@@ -18,6 +18,9 @@ namespace
     // separate connection for the config stream (always open, does not block the requests)
     WiFiClientSecure streamSslClient;
     AsyncClientClass streamClient(streamSslClient);
+    // separate connection for the app purchase request stream
+    WiFiClientSecure remoteSslClient;
+    AsyncClientClass remoteClient(remoteSslClient);
 
     // Firebase sends a keep-alive event every ~30 s; the library reconnects by itself after 40 s.
     // This is our own backup supervision: after this much silence the stream is restarted.
@@ -60,6 +63,20 @@ namespace
         }
     }
 
+    void remoteStreamCallback(AsyncResult &r)
+    {
+        if (gCloud == nullptr)
+            return;
+        if (r.isError())
+            gCloud->onRemoteStreamError(r.error().code(), r.error().message().c_str());
+        if (r.available())
+        {
+            RealtimeDatabaseResult &st = r.to<RealtimeDatabaseResult>();
+            if (st.isStream())
+                gCloud->onRemoteStreamEvent(st.event(), st.dataPath(), st.to<String>());
+        }
+    }
+
     // "/conf/" -> "/conf"
     String streamPath()
     {
@@ -69,16 +86,37 @@ namespace
         return p;
     }
 
+    // "/remote/" + "machine1" -> "/remote/machine1"
+    String remoteBasePath() { return String(DB_REMOTE_PATH) + REMOTE_DEVICE_ID; }
+
+    // Card UID in the users/<UID> key format (CardUid::toHex): upper-case hex, 4-10 bytes
+    bool validCardUid(const char *uid)
+    {
+        const size_t n = strlen(uid);
+        if (n < 8 || n > 20 || n >= CardUid::kHexBufferSize)
+            return false;
+        for (size_t i = 0; i < n; i++)
+            if (!((uid[i] >= '0' && uid[i] <= '9') || (uid[i] >= 'A' && uid[i] <= 'F')))
+                return false;
+        return true;
+    }
+
     // log-type request: no response, the worker may retry / drop it
     inline bool isFireAndForget(const CloudRequest &req)
     {
-        return req.op == CloudOp::WriteLog || req.op == CloudOp::DeviceEvent;
+        return req.op == CloudOp::WriteLog || req.op == CloudOp::DeviceEvent || req.op == CloudOp::RemoteStatus ||
+               req.op == CloudOp::RemoteOnline;
     }
 
     void logLost(const char *why, const CloudRequest &req, const char *err = "")
     {
         if (req.op == CloudOp::DeviceEvent)
             LOGE(TAG, "LOST device event (%s): %s: %s %s", why, req.event, req.detail, err);
+        else if (req.op == CloudOp::RemoteStatus)
+            LOGE(TAG, "LOST app status (%s): %s %s E%u %s", why, req.remoteId, remoteStateName(req.remoteState),
+                 req.errorCode, err);
+        else if (req.op == CloudOp::RemoteOnline)
+            LOGW(TAG, "App heartbeat dropped (%s) %s", why, err);
         else
             LOGE(TAG, "LOST log (%s): uid=%s action=%ld %s", why, req.uid, (long)req.action, err);
     }
@@ -95,6 +133,9 @@ namespace
         case CloudOp::FetchConfig: return "Fetch config";
         case CloudOp::ConfigChanged: return "Config change (stream)";
         case CloudOp::DeviceEvent: return "Write device event";
+        case CloudOp::RemoteVend: return "App request (stream)";
+        case CloudOp::RemoteStatus: return "Write app status";
+        case CloudOp::RemoteOnline: return "Write app heartbeat";
         }
         return "?";
     }
@@ -222,7 +263,7 @@ void FirebaseCloud::run()
         }
         if (netClient_ != nullptr)
             netClient_->onNetTick(online);
-        maintainStream(online, online && appStarted_ && app.ready());
+        maintainStreams(online, online && appStarted_ && app.ready());
 
         const bool nowReady = online && appStarted_ && app.ready();
         ready_.store(nowReady);
@@ -298,7 +339,9 @@ void FirebaseCloud::process(CloudRequest &req)
     if (isFireAndForget(req))
     {
         // event created before the time sync: fill in the timestamp now; if there is no exact time yet, later
-        if (req.timestamp < 1700000000u)
+        // (the app status / heartbeat use the server time instead)
+        const bool needsTime = req.op == CloudOp::WriteLog || req.op == CloudOp::DeviceEvent;
+        if (needsTime && req.timestamp < 1700000000u)
         {
             if (!clock_.synced())
             {
@@ -310,7 +353,14 @@ void FirebaseCloud::process(CloudRequest &req)
         }
 
         ErrorInfo err;
-        const bool ok = req.op == CloudOp::DeviceEvent ? writeDeviceEvent(req, err) : writeLog(req, err);
+        bool ok = false;
+        switch (req.op)
+        {
+        case CloudOp::DeviceEvent: ok = writeDeviceEvent(req, err); break;
+        case CloudOp::RemoteStatus: ok = writeRemoteStatus(req, err); break;
+        case CloudOp::RemoteOnline: ok = writeRemoteOnline(req, err); break;
+        default: ok = writeLog(req, err); break;
+        }
         if (!ok)
         {
             req.attempt++;
@@ -338,7 +388,10 @@ void FirebaseCloud::process(CloudRequest &req)
     case CloudOp::FetchConfig: fetchConfig(req, resp); break;
     case CloudOp::WriteLog:
     case CloudOp::DeviceEvent:
-    case CloudOp::ConfigChanged: break;
+    case CloudOp::ConfigChanged:
+    case CloudOp::RemoteVend:
+    case CloudOp::RemoteStatus:
+    case CloudOp::RemoteOnline: break;
     }
     LOGD(TAG, "%s: %s (%lu ms)", opName(req.op), resp.ok ? "OK" : "FAILED", (unsigned long)(millis() - started));
     respond(resp);
@@ -392,63 +445,117 @@ bool FirebaseCloud::writeDeviceEvent(const CloudRequest &req, ErrorInfo &err)
     return true;
 }
 
-// ------------------------------------------------------------------ config stream
+// ------------------------------------------------------------------ streams (config, app requests)
 
-void FirebaseCloud::maintainStream(bool online, bool ready)
+void FirebaseCloud::maintainStreams(bool online, bool ready)
+{
+    // fresh streams after a reconnect (the old TLS connections are dead)
+    const bool reconnected = online && !wasOnline_;
+    wasOnline_ = online;
+
+    maintainStream(confStream_, online, ready, reconnected);
+    liveUpdates_.store(ready && streamLive(confStream_));
+    if (settings::kRemoteVendEnabled)
+    {
+        maintainStream(remoteStream_, online, ready, reconnected);
+        remoteLive_.store(ready && streamLive(remoteStream_));
+    }
+}
+
+bool FirebaseCloud::streamLive(const Stream &s) const
+{
+    return s.active && s.lastEventMs != 0 && millis() - s.lastEventMs <= kStreamStallMs;
+}
+
+void FirebaseCloud::maintainStream(Stream &s, bool online, bool ready, bool reconnected)
 {
     const uint32_t now = millis();
 
-    // fresh stream after a reconnect (the old TLS connection is dead)
-    if (online && !wasOnline_ && streamActive_)
-        stopStream("WiFi reconnect");
-    wasOnline_ = online;
+    if (reconnected && s.active)
+        stopStream(s, "WiFi reconnect");
 
     if (!ready)
     {
-        if (streamActive_ && !online)
-            stopStream("nincs WiFi");
-        liveUpdates_.store(false);
+        if (s.active && !online)
+            stopStream(s, "no WiFi");
         return;
     }
 
-    if (!streamActive_)
+    if (!s.active)
     {
-        if (static_cast<int32_t>(now - nextStreamStartMs_) >= 0)
-            startStream();
+        if (static_cast<int32_t>(now - s.nextStartMs) >= 0)
+            startStream(s);
     }
-    else if (streamRestart_)
+    else if (s.restart)
     {
-        stopStream("closed by the server (cancel / auth_revoked)");
+        stopStream(s, "closed by the server (cancel / auth_revoked)");
     }
-    else if (now - lastStreamEventMs_ > kStreamStallMs)
+    else if (now - s.lastEventMs > kStreamStallMs)
     {
-        stopStream("no event (keep-alive) for 90 s");
+        stopStream(s, "no event (keep-alive) for 90 s");
     }
-
-    liveUpdates_.store(streamActive_ && now - lastStreamEventMs_ <= kStreamStallMs && lastStreamEventMs_ != 0);
 }
 
-void FirebaseCloud::startStream()
+// The request stream is the third TLS connection: only started if it leaves enough heap for the others
+bool FirebaseCloud::remoteHeapOk()
 {
-    streamSslClient.setInsecure();
-    streamSslClient.setHandshakeTimeout(settings::kFirebaseHandshakeTimeoutS);
-    streamClient.setSSEFilters("put,patch,keep-alive,cancel,auth_revoked");
-
-    const String path = streamPath();
-    LOGI(TAG, "Starting config stream: %s", path.c_str());
-    db.get(streamClient, path, streamCallback, true /* SSE */, "confStream");
-    streamActive_ = true;
-    streamRestart_ = false;
-    lastStreamEventMs_ = millis(); // the supervision counts from here
+    const uint32_t freeHeap = ESP.getFreeHeap();
+    if (freeHeap >= settings::kRemoteStreamMinFreeHeap)
+    {
+        remoteHeapWarned_ = false;
+        return true;
+    }
+    if (!remoteHeapWarned_)
+    {
+        remoteHeapWarned_ = true;
+        LOGW(TAG, "Remote request stream NOT started: free heap %u < %u bytes", (unsigned)freeHeap,
+             (unsigned)settings::kRemoteStreamMinFreeHeap);
+        CloudRequest ev = makeDeviceEvent(millis() + kEventTtlMs, 0, "remote", "stream not started, free heap: %u bytes",
+                                          (unsigned)freeHeap);
+        xQueueSendToBack(requests_, &ev, 0);
+    }
+    return false;
 }
 
-void FirebaseCloud::stopStream(const char *reason)
+void FirebaseCloud::startStream(Stream &s)
 {
-    LOGW(TAG, "Config stream stopped: %s", reason);
-    streamClient.stopAsync(true);
-    streamActive_ = false;
-    liveUpdates_.store(false);
-    nextStreamStartMs_ = millis() + kStreamRestartDelayMs;
+    if (&s == &remoteStream_)
+    {
+        if (!remoteHeapOk())
+        {
+            s.nextStartMs = millis() + settings::kRemoteStreamHeapRetryMs;
+            return;
+        }
+        remoteSslClient.setInsecure();
+        remoteSslClient.setHandshakeTimeout(settings::kFirebaseHandshakeTimeoutS);
+        remoteClient.setSSEFilters("put,patch,keep-alive,cancel,auth_revoked");
+        const String path = remoteBasePath() + "/req";
+        LOGI(TAG, "Starting remote request stream: %s (free heap: %u)", path.c_str(), (unsigned)ESP.getFreeHeap());
+        db.get(remoteClient, path, remoteStreamCallback, true /* SSE */, "remoteStream");
+    }
+    else
+    {
+        streamSslClient.setInsecure();
+        streamSslClient.setHandshakeTimeout(settings::kFirebaseHandshakeTimeoutS);
+        streamClient.setSSEFilters("put,patch,keep-alive,cancel,auth_revoked");
+        const String path = streamPath();
+        LOGI(TAG, "Starting config stream: %s", path.c_str());
+        db.get(streamClient, path, streamCallback, true /* SSE */, "confStream");
+    }
+    s.active = true;
+    s.restart = false;
+    s.lastEventMs = millis(); // the supervision counts from here
+}
+
+void FirebaseCloud::stopStream(Stream &s, const char *reason)
+{
+    LOGW(TAG, "%s stream stopped: %s", s.name, reason);
+    if (&s == &remoteStream_)
+        remoteClient.stopAsync(true);
+    else
+        streamClient.stopAsync(true);
+    s.active = false;
+    s.nextStartMs = millis() + kStreamRestartDelayMs;
 }
 
 void FirebaseCloud::onStreamError(int code, const char *message)
@@ -458,7 +565,7 @@ void FirebaseCloud::onStreamError(int code, const char *message)
 
 void FirebaseCloud::onStreamEvent(const String &event, const String &path, const String &data)
 {
-    lastStreamEventMs_ = millis();
+    confStream_.lastEventMs = millis();
 
     if (event.indexOf("keep-alive") >= 0)
     {
@@ -468,7 +575,7 @@ void FirebaseCloud::onStreamEvent(const String &event, const String &path, const
     if (event.indexOf("cancel") >= 0 || event.indexOf("auth_revoked") >= 0)
     {
         LOGW(TAG, "Config stream: %s", event.c_str());
-        streamRestart_ = true;
+        confStream_.restart = true;
         return;
     }
     const bool isPut = event.indexOf("put") >= 0;
@@ -532,6 +639,137 @@ void FirebaseCloud::onStreamEvent(const String &event, const String &path, const
          resp.hasPrice ? (String("price=") + resp.config.price + " ").c_str() : "",
          resp.hasFree ? "free=" : "", resp.hasFree ? (resp.config.freeMode ? "true" : "false") : "");
     respond(resp);
+}
+
+// ------------------------------------------------------------------ app purchase requests (remote/<dev>/req)
+
+void FirebaseCloud::onRemoteStreamError(int code, const char *message)
+{
+    LOGW(TAG, "Remote request stream error: %s (code %d)", message, code);
+}
+
+// Events: put "/" = all pending requests (stream start), put "/<id>" = a new request, put "/<id>" null = deleted,
+// patch "/" {"<id>": null} = deleted by our own multi-path PATCH (status + delete).
+// Every request is forwarded to the controller, which decides (and answers + deletes it). Deletions must never be
+// forwarded: answering one would delete again, whose echo would be answered again - an endless write loop.
+void FirebaseCloud::onRemoteStreamEvent(const String &event, const String &path, const String &data)
+{
+    remoteStream_.lastEventMs = millis();
+
+    if (event.indexOf("keep-alive") >= 0)
+        return;
+    if (event.indexOf("cancel") >= 0 || event.indexOf("auth_revoked") >= 0)
+    {
+        LOGW(TAG, "Remote request stream: %s", event.c_str());
+        remoteStream_.restart = true;
+        return;
+    }
+    if (event.indexOf("put") < 0 && event.indexOf("patch") < 0)
+        return;
+
+    if (path == "/")
+    {
+        JsonDocument doc;
+        if (deserializeJson(doc, data) || !doc.is<JsonObject>())
+            return; // null: no pending request
+        for (JsonPairConst kv : doc.as<JsonObjectConst>())
+        {
+            if (kv.value().isNull())
+                continue; // deleted
+            String json;
+            serializeJson(kv.value(), json);
+            respondRemote(String(kv.key().c_str()), json);
+        }
+        return;
+    }
+
+    const String id = path.substring(1);
+    if (id.indexOf('/') >= 0)
+    {
+        LOGD(TAG, "Remote request stream: %s %s ignored", event.c_str(), path.c_str());
+        return; // partial change of a request - the app writes whole requests
+    }
+    String v = data;
+    v.trim();
+    if (v.isEmpty() || v == "null")
+        return; // deleted (e.g. by us after handling it)
+    respondRemote(id, v);
+}
+
+void FirebaseCloud::respondRemote(const String &id, const String &json)
+{
+    if (json.isEmpty() || json == "null")
+        return; // deleted - never answered (see onRemoteStreamEvent)
+
+    CloudResponse resp;
+    resp.op = CloudOp::RemoteVend;
+    snprintf(resp.remoteId, sizeof(resp.remoteId), "%s", id.c_str());
+
+    JsonDocument doc;
+    const bool parsed = !deserializeJson(doc, json) && doc.is<JsonObject>();
+    const char *uid = parsed ? (doc["cardUid"] | "") : "";
+    snprintf(resp.user.uid, sizeof(resp.user.uid), "%s", uid);
+    const double ts = parsed && doc["ts"].is<double>() ? doc["ts"].as<double>() : 0.0;
+    resp.remoteTsMs = ts > 0 ? static_cast<uint64_t>(ts) : 0;
+
+    if (id.length() >= sizeof(resp.remoteId))
+        resp.error = ErrorInfo::make(ErrorCode::CloudData, 0, "request id too long: %.40s", id.c_str());
+    else if (!parsed || !validCardUid(uid) || resp.remoteTsMs == 0)
+        resp.error = ErrorInfo::make(ErrorCode::CloudData, 0, "invalid request %s: %.60s", id.c_str(), json.c_str());
+    else
+        resp.ok = true;
+
+    LOGI(TAG, "App request %s: card %s, ts %llu%s", resp.remoteId, resp.user.uid, (unsigned long long)resp.remoteTsMs,
+         resp.ok ? "" : " (INVALID)");
+    respond(resp);
+}
+
+bool FirebaseCloud::writeRemoteStatus(const CloudRequest &req, ErrorInfo &err)
+{
+    if (!settings::kRemoteVendEnabled)
+        return true;
+    // ONE multi-path PATCH on remote/<dev>: {"req/<id>": null, "status/<id>": {...}} - deleting the request and
+    // writing its status happen together
+    const String id = req.remoteId;
+    JsonDocument doc;
+    if (req.deleteRemoteRequest)
+        doc[String("req/") + id] = nullptr;
+    if (req.remoteState != RemoteState::None)
+    {
+        JsonObject st = doc[String("status/") + id].to<JsonObject>();
+        st["state"] = remoteStateName(req.remoteState);
+        st["ts"][".sv"] = "timestamp";
+        if (req.errorCode != 0)
+            st["code"] = req.errorCode;
+        if (req.charged)
+            st["credit"] = req.credit;
+    }
+    if (doc.size() == 0)
+        return true;
+
+    const String path = remoteBasePath();
+    String body;
+    serializeJson(doc, body);
+    LOGI(TAG, "PATCH %s %s", path.c_str(), body.c_str());
+    db.update(aClient, path, object_t(body));
+    return lastCallOk(opName(req.op), path.c_str(), err);
+}
+
+bool FirebaseCloud::writeRemoteOnline(const CloudRequest &req, ErrorInfo &err)
+{
+    if (!settings::kRemoteVendEnabled)
+        return true;
+    const String path = remoteBasePath() + "/online";
+    JsonDocument doc;
+    doc["ts"][".sv"] = "timestamp";
+    doc["ready"] = req.remoteReady;
+    doc["free"] = req.freeMode;
+    doc["price"] = req.price;
+    String body;
+    serializeJson(doc, body);
+    LOGD(TAG, "PUT %s %s", path.c_str(), body.c_str());
+    db.set<object_t>(aClient, path, object_t(body));
+    return lastCallOk(opName(req.op), path.c_str(), err);
 }
 
 // ------------------------------------------------------------------ operations

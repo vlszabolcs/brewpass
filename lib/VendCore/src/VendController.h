@@ -32,6 +32,17 @@ struct VendTimings
     // Changes in between arrive through the stream (ConfigChanged).
     uint32_t configRetryMs = 10000;
     uint32_t statusRefreshMs = 250;
+
+    // Remote purchase (app): a request older than this (server timestamp vs NTP time) is refused
+    uint32_t remoteMaxAgeMs = 20000;
+    // tolerated clock difference for requests that look like they come from the future
+    uint32_t remoteMaxClockSkewMs = 5000;
+    // availability heartbeat (remote/<dev>/online) interval, and the minimum gap between two writes
+    // when the availability changes in between
+    uint32_t remoteHeartbeatMs = 60000;
+    uint32_t remoteHeartbeatMinGapMs = 2000;
+    // how long a status write may wait in the queue
+    uint32_t remoteStatusTtlMs = 60000;
 };
 
 // Non-blocking state machine of the purchase flow.
@@ -41,6 +52,12 @@ struct VendTimings
 //                      │                           │                                  │              │
 //                      └─ unknown / no credit / error ───────────────────────────────► ShowResult (error screen)
 //   Idle (free mode) ──inhibit LOW──► Pulsing ──► WaitVendAck ──► Vending ──► Idle
+//   Idle ──app request (RemoteVend)──► Authorizing ──► (same as a card)
+//
+// A remote ("virtual card tap") request is only taken in Idle (or ShowResult, which it cuts short), in normal
+// mode, with inhibit LOW and if it is younger than remoteMaxAgeMs; otherwise it is refused with E33 without
+// touching the state. A card and a request in the same loop: the card wins. Progress is reported to the app
+// through RemoteStatus requests (accepted -> charged -> done | error).
 //
 // The order follows the original behaviour: the charge and the log happen BEFORE the credit pulses.
 // Differences from the original (stability): no pulses if the charge failed; every wait has a timeout.
@@ -63,13 +80,18 @@ public:
                    ICloud &cloud, INetwork &net, IClock &clock, const VendTimings &timings = VendTimings());
 
     // cachedConfig: the last saved (e.g. NVS) configuration, used until a fresh one arrives from the cloud
-    void begin(const DeviceConfig &cachedConfig);
+    // remoteMark: the last handled app purchase request (saved), so a reboot cannot run it again
+    void begin(const DeviceConfig &cachedConfig, const RemoteMark &remoteMark = RemoteMark());
     void loop();
 
     State state() const { return state_; }
     const DeviceConfig &config() const { return config_; }
     // true if the configuration changed since the last call (for saving)
     bool consumeConfigChanged();
+    // true if a new app request was handled since the last call - save remoteMark() (before the charge
+    // can start: the charge is submitted in a later loop() at the earliest)
+    bool consumeRemoteMarkChanged();
+    const RemoteMark &remoteMark() const { return remoteMark_; }
     // Redraws the screen of the current state (if something else was shown meanwhile, e.g. OTA)
     void refreshScreen();
 
@@ -83,7 +105,7 @@ private:
     void handleIdle(uint32_t nowMs, bool hasCard, const CardUid &uid);
     void handleCard(uint32_t nowMs, const CardUid &uid);
 
-    void processCloudResponses(uint32_t nowMs);
+    void processCloudResponses(uint32_t nowMs, bool cardPending);
     void onUserFetched(uint32_t nowMs, const CloudResponse &resp);
     void onUserUpdated(uint32_t nowMs, const CloudResponse &resp);
     void onConfig(uint32_t nowMs, const CloudResponse &resp);
@@ -94,6 +116,13 @@ private:
     bool configChangeAllowed() const { return state_ == State::NotReady || state_ == State::Idle; }
     void scheduleConfigRefresh(uint32_t nowMs);
     void checkTimeouts(uint32_t nowMs);
+
+    void onRemoteRequest(uint32_t nowMs, const CloudResponse &resp, bool cardPending);
+    void rejectRemote(uint32_t nowMs, const char *reqId, ErrorCode code, const char *why);
+    void sendRemoteStatus(uint32_t nowMs, const char *reqId, RemoteState st, bool deleteRequest, ErrorCode code = ErrorCode::None);
+    void finishRemote(uint32_t nowMs, RemoteState st, ErrorCode code = ErrorCode::None);
+    bool remoteReady() const;
+    void updateRemotePresence(uint32_t nowMs);
 
     void startVend(uint32_t nowMs, bool freeVend);
     void handleVendProgress(uint32_t nowMs);
@@ -157,6 +186,16 @@ private:
     int32_t chargedPrice_ = 0;
     int32_t newCredit_ = 0;
     bool freeVend_ = false;
+    bool charged_ = false; // the account of the current transaction was charged
+
+    // remote purchase
+    bool remote_ = false; // the current transaction came from the app
+    char remoteId_[kRemoteIdSize] = {0};
+    RemoteMark remoteMark_;
+    bool remoteMarkChanged_ = false;
+    bool presenceAttempted_ = false;
+    bool presenceReady_ = false;
+    uint32_t lastPresenceMs_ = 0;
     uint32_t freeRetriggerAtMs_ = 0;
     uint32_t successShownAtMs_ = 0;
 

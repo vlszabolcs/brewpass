@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "CardDebouncer.h"
+#include "Messages.h"
 #include "PurchasePolicy.h"
 #include "VendController.h"
 
@@ -98,6 +99,7 @@ struct FakeFeedback : IFeedback
 struct FakeCloud : ICloud
 {
     bool isReady = true;
+    bool isRemoteLive = true;
     std::vector<CloudRequest> requests;
     std::deque<CloudResponse> responses;
     // automatic responses
@@ -108,6 +110,7 @@ struct FakeCloud : ICloud
     DeviceConfig cfg{100, false, true};
 
     bool ready() const override { return isReady; }
+    bool remoteLive() const override { return isRemoteLive; }
     ErrorInfo statusError() const override { return ErrorInfo::none(); }
     bool submit(const CloudRequest &r) override
     {
@@ -136,6 +139,8 @@ struct FakeCloud : ICloud
             break;
         case CloudOp::WriteLog:
             resp.ok = true;
+            break;
+        default:
             break;
         }
         responses.push_back(resp);
@@ -595,6 +600,256 @@ void test_reader_events_throttled()
     TEST_ASSERT_EQUAL(2, countEvents(r, "reader"));
 }
 
+// ------------------------------------------------------------------ remote purchase (app)
+
+void pushRemote(Rig &r, const char *id, const char *uid = "04A1B2C3", uint32_t ageMs = 1000, bool ok = true)
+{
+    CloudResponse req;
+    req.op = CloudOp::RemoteVend;
+    req.ok = ok;
+    snprintf(req.remoteId, sizeof(req.remoteId), "%s", id);
+    snprintf(req.user.uid, sizeof(req.user.uid), "%s", uid);
+    req.remoteTsMs = static_cast<uint64_t>(r.clock.epoch()) * 1000 - ageMs;
+    r.cloud.responses.push_back(req);
+}
+
+std::vector<CloudRequest> remoteStatuses(Rig &r, const char *id)
+{
+    std::vector<CloudRequest> out;
+    for (auto &q : r.cloud.requests)
+        if (q.op == CloudOp::RemoteStatus && strcmp(q.remoteId, id) == 0)
+            out.push_back(q);
+    return out;
+}
+
+void test_remote_happy_path()
+{
+    Rig r;
+    r.start();
+    pushRemote(r, "-Nreq1");
+    r.step();
+    TEST_ASSERT_EQUAL(1, r.cloud.count(CloudOp::FetchUser));
+    TEST_ASSERT_EQUAL_STRING("04A1B2C3", r.cloud.lastOf(CloudOp::FetchUser)->uid);
+    TEST_ASSERT_TRUE(r.ctl->consumeRemoteMarkChanged());
+    r.step(2);
+    TEST_ASSERT_EQUAL_INT32(400, r.cloud.lastOf(CloudOp::UpdateUser)->credit);
+    TEST_ASSERT_EQUAL(1, r.coin.pulseTrains);
+    TEST_ASSERT_EQUAL_STRING(msg::kRemoteVendInProgress, r.ui.last().text);
+
+    r.step(3);
+    r.coin.accepting = false;
+    r.step();
+    r.coin.accepting = true;
+    r.step();
+    TEST_ASSERT_EQUAL(S::ShowResult, r.state());
+
+    auto st = remoteStatuses(r, "-Nreq1");
+    TEST_ASSERT_EQUAL(3, (int)st.size());
+    TEST_ASSERT_EQUAL(RemoteState::Accepted, st[0].remoteState);
+    TEST_ASSERT_TRUE(st[0].deleteRemoteRequest); // the request is consumed right away
+    TEST_ASSERT_EQUAL(RemoteState::Charged, st[1].remoteState);
+    TEST_ASSERT_TRUE(st[1].charged);
+    TEST_ASSERT_EQUAL_INT32(400, st[1].credit);
+    TEST_ASSERT_EQUAL(RemoteState::Done, st[2].remoteState);
+    TEST_ASSERT_EQUAL_INT32(400, st[2].credit);
+}
+
+void test_remote_expired_request_refused()
+{
+    Rig r;
+    r.start();
+    pushRemote(r, "-Nold", "04A1B2C3", r.timings.remoteMaxAgeMs + 1000);
+    r.step();
+    TEST_ASSERT_EQUAL(0, r.cloud.count(CloudOp::FetchUser));
+    TEST_ASSERT_EQUAL(S::Idle, r.state());
+    auto st = remoteStatuses(r, "-Nold");
+    TEST_ASSERT_EQUAL(1, (int)st.size());
+    TEST_ASSERT_EQUAL(RemoteState::Error, st[0].remoteState);
+    TEST_ASSERT_EQUAL(33, st[0].errorCode);
+    TEST_ASSERT_TRUE(st[0].deleteRemoteRequest);
+}
+
+void test_remote_refused_while_busy()
+{
+    Rig r;
+    r.start();
+    r.cloud.autoRespond = false;
+    r.tap();
+    r.step();
+    TEST_ASSERT_EQUAL(S::Authorizing, r.state());
+    pushRemote(r, "-Nbusy", "11223344");
+    r.step();
+    TEST_ASSERT_EQUAL(S::Authorizing, r.state());
+    TEST_ASSERT_EQUAL(1, r.cloud.count(CloudOp::FetchUser));
+    auto st = remoteStatuses(r, "-Nbusy");
+    TEST_ASSERT_EQUAL(1, (int)st.size());
+    TEST_ASSERT_EQUAL(33, st[0].errorCode);
+    TEST_ASSERT_FALSE(st[0].charged);
+}
+
+void test_card_wins_over_remote_in_same_loop()
+{
+    Rig r;
+    r.start();
+    r.cloud.autoRespond = false;
+    r.tap(0x05);
+    pushRemote(r, "-Nrace", "11223344");
+    r.step();
+    TEST_ASSERT_EQUAL(1, r.cloud.count(CloudOp::FetchUser));
+    TEST_ASSERT_EQUAL_STRING("05A1B2C3", r.cloud.lastOf(CloudOp::FetchUser)->uid);
+    TEST_ASSERT_EQUAL(33, remoteStatuses(r, "-Nrace")[0].errorCode);
+}
+
+void test_remote_request_not_run_twice()
+{
+    Rig r;
+    r.start();
+    pushRemote(r, "-Ndup");
+    r.step(10);
+    pushRemote(r, "-Ndup", "04A1B2C3", 1000 + 100); // re-delivered after a stream restart
+    r.step();
+    TEST_ASSERT_EQUAL(1, r.cloud.count(CloudOp::FetchUser));
+    auto st = remoteStatuses(r, "-Ndup");
+    TEST_ASSERT_EQUAL(RemoteState::None, st.back().remoteState);
+    TEST_ASSERT_TRUE(st.back().deleteRemoteRequest);
+}
+
+void test_remote_mark_survives_reboot()
+{
+    Rig r;
+    RemoteMark mark;
+    mark.tsMs = static_cast<uint64_t>(r.clock.epoch()) * 1000;
+    snprintf(mark.id, sizeof(mark.id), "-Nzz");
+    r.ctl = new VendController(r.reader, r.coin, r.ui, r.fb, r.cloud, r.net, r.clock, r.timings);
+    r.ctl->begin(DeviceConfig(), mark);
+    r.step(5);
+    TEST_ASSERT_EQUAL(S::Idle, r.state());
+    pushRemote(r, "-Nzz", "04A1B2C3", 50 + 1000); // handled before the reboot
+    r.step();
+    TEST_ASSERT_EQUAL(0, r.cloud.count(CloudOp::FetchUser));
+    pushRemote(r, "-Nzz2", "04A1B2C3", 0); // newer request
+    r.step();
+    TEST_ASSERT_EQUAL(1, r.cloud.count(CloudOp::FetchUser));
+}
+
+void test_remote_update_failure_means_no_pulse()
+{
+    Rig r;
+    r.start();
+    r.cloud.updateOk = false;
+    pushRemote(r, "-Nfail");
+    r.step(3);
+    TEST_ASSERT_EQUAL(0, r.coin.pulseTrains);
+    auto st = remoteStatuses(r, "-Nfail");
+    TEST_ASSERT_EQUAL(RemoteState::Error, st.back().remoteState);
+    TEST_ASSERT_EQUAL(25, st.back().errorCode);
+    TEST_ASSERT_FALSE(st.back().charged);
+}
+
+void test_remote_charged_but_inhibit_raised()
+{
+    Rig r;
+    r.start();
+    r.cloud.autoRespond = false;
+    pushRemote(r, "-Ne53");
+    r.step();
+    CloudResponse user;
+    user.id = r.cloud.lastOf(CloudOp::FetchUser)->id;
+    user.op = CloudOp::FetchUser;
+    user.ok = true;
+    user.user.credit = 500;
+    r.cloud.responses.push_back(user);
+    r.step();
+    CloudResponse upd;
+    upd.id = r.cloud.lastOf(CloudOp::UpdateUser)->id;
+    upd.op = CloudOp::UpdateUser;
+    upd.ok = true;
+    r.cloud.responses.push_back(upd);
+    r.coin.accepting = false; // the machine got busy meanwhile
+    r.step();
+    TEST_ASSERT_EQUAL(0, r.coin.pulseTrains);
+    auto st = remoteStatuses(r, "-Ne53");
+    TEST_ASSERT_EQUAL(RemoteState::Error, st.back().remoteState);
+    TEST_ASSERT_EQUAL(53, st.back().errorCode);
+    TEST_ASSERT_TRUE(st.back().charged);
+    TEST_ASSERT_EQUAL_INT32(400, st.back().credit);
+}
+
+void test_remote_refused_in_free_mode_and_when_machine_busy()
+{
+    Rig r;
+    r.cloud.cfg.freeMode = true;
+    r.start();
+    r.step(3);
+    r.coin.accepting = false; // free credit taken, drink in progress
+    r.step(2);
+    pushRemote(r, "-Nfree");
+    r.step();
+    TEST_ASSERT_EQUAL(33, remoteStatuses(r, "-Nfree")[0].errorCode);
+
+    Rig r2;
+    r2.start();
+    r2.coin.accepting = false;
+    pushRemote(r2, "-Ninh");
+    r2.step();
+    TEST_ASSERT_EQUAL(50, remoteStatuses(r2, "-Ninh")[0].errorCode);
+    TEST_ASSERT_EQUAL(0, r2.cloud.count(CloudOp::FetchUser));
+    TEST_ASSERT_EQUAL(S::Idle, r2.state()); // no error screen for a refused app request
+}
+
+void test_remote_malformed_request()
+{
+    Rig r;
+    r.start();
+    pushRemote(r, "-Nbad", "", 1000, false);
+    r.step();
+    TEST_ASSERT_EQUAL(24, remoteStatuses(r, "-Nbad")[0].errorCode);
+    TEST_ASSERT_EQUAL(0, r.cloud.count(CloudOp::FetchUser));
+}
+
+void test_remote_cuts_result_screen_short()
+{
+    Rig r;
+    r.start();
+    r.cloud.userCredit = 0;
+    r.tap();
+    r.step(2);
+    TEST_ASSERT_EQUAL(S::ShowResult, r.state()); // E31 screen of someone else
+    r.cloud.userCredit = 500;
+    pushRemote(r, "-Nnext");
+    r.step();
+    TEST_ASSERT_EQUAL(2, r.cloud.count(CloudOp::FetchUser));
+}
+
+const CloudRequest *lastPresence(Rig &r) { return r.cloud.lastOf(CloudOp::RemoteOnline); }
+
+void test_remote_presence_heartbeat()
+{
+    Rig r;
+    r.start();
+    TEST_ASSERT_NOT_NULL(lastPresence(r)); // first one right away (still starting: not ready)
+    r.step(25, 100);                       // Idle -> ready, written after the min gap
+    TEST_ASSERT_TRUE(lastPresence(r)->remoteReady);
+    TEST_ASSERT_EQUAL_INT32(100, lastPresence(r)->price);
+    const int first = r.cloud.count(CloudOp::RemoteOnline);
+
+    r.step(50, 100); // 5 s, nothing changed
+    TEST_ASSERT_EQUAL(first, r.cloud.count(CloudOp::RemoteOnline));
+
+    r.coin.accepting = false; // machine busy -> not ready, reported after the min gap
+    r.step(30, 100);
+    TEST_ASSERT_EQUAL(first + 1, r.cloud.count(CloudOp::RemoteOnline));
+    TEST_ASSERT_FALSE(lastPresence(r)->remoteReady);
+
+    r.step(65, 1000); // periodic heartbeat
+    TEST_ASSERT_EQUAL(first + 2, r.cloud.count(CloudOp::RemoteOnline));
+
+    r.coin.accepting = true;
+    r.cloud.isRemoteLive = false; // no request stream -> not ready
+    r.step(30, 100);
+    TEST_ASSERT_FALSE(lastPresence(r)->remoteReady);
+}
+
 int main(int, char **)
 {
     UNITY_BEGIN();
@@ -621,5 +876,17 @@ int main(int, char **)
     RUN_TEST(test_event_on_config_change);
     RUN_TEST(test_event_on_money_related_error);
     RUN_TEST(test_reader_events_throttled);
+    RUN_TEST(test_remote_happy_path);
+    RUN_TEST(test_remote_expired_request_refused);
+    RUN_TEST(test_remote_refused_while_busy);
+    RUN_TEST(test_card_wins_over_remote_in_same_loop);
+    RUN_TEST(test_remote_request_not_run_twice);
+    RUN_TEST(test_remote_mark_survives_reboot);
+    RUN_TEST(test_remote_update_failure_means_no_pulse);
+    RUN_TEST(test_remote_charged_but_inhibit_raised);
+    RUN_TEST(test_remote_refused_in_free_mode_and_when_machine_busy);
+    RUN_TEST(test_remote_malformed_request);
+    RUN_TEST(test_remote_cuts_result_screen_short);
+    RUN_TEST(test_remote_presence_heartbeat);
     return UNITY_END();
 }

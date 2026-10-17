@@ -19,6 +19,8 @@ namespace msg
     constexpr const char *kVendInProgress = "Kredit átadva - válassz italt";
     constexpr const char *kVendDone = "Jó kávézást!";
     constexpr const char *kFreeVend = "Kredit átadva (ingyenes)";
+    constexpr const char *kRemoteRequest = "Appból";
+    constexpr const char *kRemoteVendInProgress = "Appból - válassz italt";
     constexpr const char *kErrorPrefix = "HIBA";
 
     constexpr const char *kPriceLabel = "Ár:";
@@ -62,6 +64,7 @@ namespace msg
         case ErrorCode::CreditUpdateFailed: return "Egyenleg frissítése sikertelen";
         case ErrorCode::CardUnknown: return "Nem regisztrált kártya";
         case ErrorCode::CreditLow: return "Nincs elég kredit";
+        case ErrorCode::RemoteRejected: return "Távoli vásárlás elutasítva";
         case ErrorCode::ReaderFault: return "RFID olvasó hiba";
         case ErrorCode::MachineNotReady: return "A gép nem fogad kreditet";
         case ErrorCode::VendNotAcknowledged: return "A gép nem jelezte a kredit fogadását";
@@ -88,6 +91,7 @@ namespace msg
         case ErrorCode::CreditUpdateFailed: return "Nem történt terhelés, próbáld újra";
         case ErrorCode::CardUnknown: return "Kérd a kártya regisztrálását";
         case ErrorCode::CreditLow: return "Töltsd fel az egyenleged";
+        case ErrorCode::RemoteRejected: return "A gép foglalt vagy a kérés lejárt";
         case ErrorCode::ReaderFault: return "Olvasó újraindítása...";
         case ErrorCode::MachineNotReady: return "Várd meg, amíg a gép kész";
         case ErrorCode::VendNotAcknowledged: return "Ellenőrizd a gépet";

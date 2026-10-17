@@ -25,6 +25,7 @@ enum class ErrorCode : uint16_t
 
     CardUnknown = 30,
     CreditLow = 31,
+    RemoteRejected = 33, // app purchase request refused: machine busy / not ready, free mode or request expired
 
     ReaderFault = 40,
 
@@ -53,6 +54,7 @@ inline const char *errorCodeName(ErrorCode code)
     case ErrorCode::CreditUpdateFailed: return "CreditUpdateFailed";
     case ErrorCode::CardUnknown: return "CardUnknown";
     case ErrorCode::CreditLow: return "CreditLow";
+    case ErrorCode::RemoteRejected: return "RemoteRejected";
     case ErrorCode::ReaderFault: return "ReaderFault";
     case ErrorCode::MachineNotReady: return "MachineNotReady";
     case ErrorCode::VendNotAcknowledged: return "VendNotAcknowledged";

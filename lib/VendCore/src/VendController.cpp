@@ -54,9 +54,10 @@ const char *VendController::stateName(State s)
     return "?";
 }
 
-void VendController::begin(const DeviceConfig &cachedConfig)
+void VendController::begin(const DeviceConfig &cachedConfig, const RemoteMark &remoteMark)
 {
     config_ = cachedConfig;
+    remoteMark_ = remoteMark;
     if (config_.loaded)
         LOGI(TAG, "Saved configuration: price=%ld Ft, free=%s", (long)config_.price, config_.freeMode ? "yes" : "no");
 
@@ -71,6 +72,13 @@ bool VendController::consumeConfigChanged()
 {
     const bool changed = configChanged_;
     configChanged_ = false;
+    return changed;
+}
+
+bool VendController::consumeRemoteMarkChanged()
+{
+    const bool changed = remoteMarkChanged_;
+    remoteMarkChanged_ = false;
     return changed;
 }
 
@@ -112,7 +120,7 @@ void VendController::loop()
     }
 
     pendingEventNowMs_ = now; // for the event log of offerConfig()
-    processCloudResponses(now);
+    processCloudResponses(now, hasCard);
     trackReaderHealth(now);
     applyPendingConfig();
     scheduleConfigRefresh(now);
@@ -147,6 +155,7 @@ void VendController::loop()
         break;
     }
 
+    updateRemotePresence(now);
     updateStatus(now);
 }
 
@@ -237,6 +246,8 @@ void VendController::handleCard(uint32_t nowMs, const CardUid &uid)
 
     user_ = UserRecord();
     uid.toHex(user_.uid, sizeof(user_.uid));
+    remote_ = false;
+    charged_ = false;
     LOGI(TAG, "Card: %s", user_.uid);
 
     if (!coin_.acceptingCredit())
@@ -346,7 +357,7 @@ void VendController::trackReaderHealth(uint32_t nowMs)
     readerFlapsSuppressed_ = 0;
 }
 
-void VendController::processCloudResponses(uint32_t nowMs)
+void VendController::processCloudResponses(uint32_t nowMs, bool cardPending)
 {
     CloudResponse resp;
     while (cloud_.poll(resp))
@@ -361,7 +372,13 @@ void VendController::processCloudResponses(uint32_t nowMs)
             onConfigPush(resp);
             continue;
         }
-        if (resp.op == CloudOp::WriteLog || resp.op == CloudOp::DeviceEvent)
+        if (resp.op == CloudOp::RemoteVend)
+        {
+            onRemoteRequest(nowMs, resp, cardPending);
+            continue;
+        }
+        if (resp.op == CloudOp::WriteLog || resp.op == CloudOp::DeviceEvent || resp.op == CloudOp::RemoteStatus ||
+            resp.op == CloudOp::RemoteOnline)
             continue; // the worker logs the result itself
 
         if (resp.id != pendingId_ || pendingId_ == 0)
@@ -436,6 +453,9 @@ void VendController::onUserUpdated(uint32_t nowMs, const CloudResponse &resp)
 
     LOGI(TAG, "Charged %ld Ft, new credit: %ld Ft (%s)", (long)chargedPrice_, (long)newCredit_, user_.uid);
     user_.credit = newCredit_; // the log entry was written together with the credit (users/<UID>/log)
+    charged_ = true;
+    if (remote_)
+        sendRemoteStatus(nowMs, remoteId_, RemoteState::Charged, false);
 
     // Same as the original: pulses only if the machine still accepts credit
     if (!coin_.acceptingCredit())
@@ -581,6 +601,131 @@ void VendController::checkTimeouts(uint32_t nowMs)
     }
 }
 
+// ------------------------------------------------------------------ remote purchase (app)
+
+void VendController::onRemoteRequest(uint32_t nowMs, const CloudResponse &resp, bool cardPending)
+{
+    const char *id = resp.remoteId;
+    if (!resp.ok)
+    {
+        LOGW(TAG, "App request %s malformed: %s", id, resp.error.detail);
+        sendRemoteStatus(nowMs, id, RemoteState::Error, true, ErrorCode::CloudData);
+        return;
+    }
+    if (remoteMark_.covers(resp.remoteTsMs, id))
+    {
+        // re-delivered by the stream (restart / reboot) - already answered, only make sure it is gone
+        LOGI(TAG, "App request %s already handled - deleting", id);
+        sendRemoteStatus(nowMs, id, RemoteState::None, true);
+        return;
+    }
+    remoteMark_.tsMs = resp.remoteTsMs;
+    copyStr(remoteMark_.id, sizeof(remoteMark_.id), id);
+    remoteMarkChanged_ = true;
+
+    LOGI(TAG, "App request %s: card %s", id, resp.user.uid);
+
+    if (!clock_.synced())
+        return rejectRemote(nowMs, id, ErrorCode::RemoteRejected, "no exact time, the request age is unknown");
+    const int64_t ageMs = static_cast<int64_t>(clock_.epoch()) * 1000 - static_cast<int64_t>(resp.remoteTsMs);
+    if (ageMs > static_cast<int64_t>(timings_.remoteMaxAgeMs))
+        return rejectRemote(nowMs, id, ErrorCode::RemoteRejected, "expired");
+    if (ageMs < -static_cast<int64_t>(timings_.remoteMaxClockSkewMs))
+        return rejectRemote(nowMs, id, ErrorCode::RemoteRejected, "timestamp in the future (clock?)");
+    if (cardPending)
+        return rejectRemote(nowMs, id, ErrorCode::RemoteRejected, "a card was tapped at the machine");
+
+    const bool ready = !readinessError().isError();
+    if (state_ == State::ShowResult && ready)
+        setState(State::Idle, nowMs); // the result screen of the previous purchase is cut short
+    if (state_ != State::Idle || !ready)
+        return rejectRemote(nowMs, id, ErrorCode::RemoteRejected, stateName(state_));
+    if (config_.freeMode)
+        return rejectRemote(nowMs, id, ErrorCode::RemoteRejected, "free mode");
+    if (!coin_.acceptingCredit())
+        return rejectRemote(nowMs, id, ErrorCode::MachineNotReady, "inhibit active");
+
+    feedback_.play(FeedbackPattern::CardAccepted);
+    user_ = UserRecord();
+    copyStr(user_.uid, sizeof(user_.uid), resp.user.uid);
+    remote_ = true;
+    charged_ = false;
+    copyStr(remoteId_, sizeof(remoteId_), id);
+    sendRemoteStatus(nowMs, id, RemoteState::Accepted, true);
+
+    CloudRequest req;
+    req.op = CloudOp::FetchUser;
+    copyStr(req.uid, sizeof(req.uid), user_.uid);
+    if (!submit(req, nowMs))
+        return; // showError() already answered the app
+
+    showChecking();
+    deadlineMs_ = nowMs + timings_.fetchUserTimeoutMs;
+    setState(State::Authorizing, nowMs);
+}
+
+void VendController::rejectRemote(uint32_t nowMs, const char *reqId, ErrorCode code, const char *why)
+{
+    LOGW(TAG, "App request %s refused: E%u (%s)", reqId, static_cast<unsigned>(code), why);
+    sendRemoteStatus(nowMs, reqId, RemoteState::Error, true, code);
+}
+
+void VendController::sendRemoteStatus(uint32_t nowMs, const char *reqId, RemoteState st, bool deleteRequest, ErrorCode code)
+{
+    CloudRequest req;
+    req.op = CloudOp::RemoteStatus;
+    req.id = nextRequestId_++;
+    if (nextRequestId_ == 0)
+        nextRequestId_ = 1;
+    req.deadlineMs = nowMs + timings_.remoteStatusTtlMs;
+    copyStr(req.remoteId, sizeof(req.remoteId), reqId);
+    req.remoteState = st;
+    req.deleteRemoteRequest = deleteRequest;
+    req.errorCode = static_cast<uint16_t>(code);
+    // the remaining credit is only reported once the account was charged in this transaction
+    req.charged = remote_ && strcmp(reqId, remoteId_) == 0 && charged_;
+    req.credit = req.charged ? user_.credit : 0;
+    if (!cloud_.submit(req))
+        LOGE(TAG, "App status NOT queued: %s %s", reqId, remoteStateName(st));
+}
+
+void VendController::finishRemote(uint32_t nowMs, RemoteState st, ErrorCode code)
+{
+    sendRemoteStatus(nowMs, remoteId_, st, false, code);
+    remote_ = false;
+}
+
+bool VendController::remoteReady() const
+{
+    return state_ == State::Idle && !config_.freeMode && coin_.acceptingCredit() && cloud_.remoteLive();
+}
+
+void VendController::updateRemotePresence(uint32_t nowMs)
+{
+    if (!cloud_.ready())
+        return;
+    const bool ready = remoteReady();
+    const bool due = !presenceAttempted_ || reached(nowMs, lastPresenceMs_ + timings_.remoteHeartbeatMs) ||
+                     (ready != presenceReady_ && reached(nowMs, lastPresenceMs_ + timings_.remoteHeartbeatMinGapMs));
+    if (!due)
+        return;
+
+    CloudRequest req;
+    req.op = CloudOp::RemoteOnline;
+    req.id = nextRequestId_++;
+    if (nextRequestId_ == 0)
+        nextRequestId_ = 1;
+    req.deadlineMs = nowMs + timings_.remoteHeartbeatMinGapMs * 5;
+    req.remoteReady = ready;
+    req.freeMode = config_.freeMode;
+    req.price = config_.price;
+    // a full queue is retried at the next interval
+    presenceAttempted_ = true;
+    lastPresenceMs_ = nowMs;
+    if (cloud_.submit(req))
+        presenceReady_ = ready;
+}
+
 // ------------------------------------------------------------------ credit hand-over
 
 void VendController::startVend(uint32_t nowMs, bool freeVend)
@@ -597,7 +742,7 @@ void VendController::startVend(uint32_t nowMs, bool freeVend)
     }
     else
     {
-        showSuccess(msg::kVendInProgress);
+        showSuccess(remote_ ? msg::kRemoteVendInProgress : msg::kVendInProgress);
         successShownAtMs_ = nowMs;
     }
     setState(State::Pulsing, nowMs);
@@ -654,6 +799,8 @@ void VendController::handleVendProgress(uint32_t nowMs)
             else
             {
                 showSuccess(msg::kVendDone);
+                if (remote_)
+                    finishRemote(nowMs, RemoteState::Done);
                 const uint32_t minUntil = successShownAtMs_ + timings_.successScreenMs;
                 showResultFor(nowMs, reached(nowMs, minUntil) ? 1000 : (minUntil - nowMs));
             }
@@ -723,7 +870,7 @@ void VendController::showChecking()
     Screen s;
     s.kind = ScreenKind::Checking;
     copyStr(s.title, sizeof(s.title), msg::kChecking);
-    snprintf(s.text, sizeof(s.text), "%s: %s", msg::kCardRead, user_.uid);
+    snprintf(s.text, sizeof(s.text), "%s: %s", remote_ ? msg::kRemoteRequest : msg::kCardRead, user_.uid);
     ui_.show(s);
 }
 
@@ -757,6 +904,8 @@ void VendController::showError(uint32_t nowMs, const ErrorInfo &e)
                            (e.code == ErrorCode::CloudTimeout && state_ == State::Charging);
     if (important)
         logEvent(nowMs, "error", "E%u %s: %s", static_cast<unsigned>(e.code), errorCodeName(e.code), e.detail);
+    if (remote_)
+        finishRemote(nowMs, RemoteState::Error, e.code);
     Screen s;
     s.kind = ScreenKind::Error;
     s.error = e;

@@ -63,7 +63,7 @@ void App::begin()
                                               afterOta ? " (after OTA update)" : "");
     cloud_.submit(boot);
 
-    controller_.begin(configStore_.load());
+    controller_.begin(configStore_.load(), configStore_.loadRemoteMark());
     hw_.feedback.play(FeedbackPattern::Startup);
     LOGI(TAG, "Startup done, free heap: %u bytes", (unsigned)ESP.getFreeHeap());
 }
@@ -81,6 +81,8 @@ void App::loop()
     controller_.loop();
     if (controller_.consumeConfigChanged())
         configStore_.save(controller_.config());
+    if (controller_.consumeRemoteMarkChanged())
+        configStore_.saveRemoteMark(controller_.remoteMark());
     hw_.ui.loop(now);
     reportHealth(now);
 }

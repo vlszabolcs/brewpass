@@ -31,11 +31,14 @@ public:
     bool poll(CloudResponse &response) override;
     ErrorInfo statusError() const override;
     bool liveUpdates() const override { return liveUpdates_.load(); }
+    bool remoteLive() const override { return remoteLive_.load(); }
 
     // from the auth / stream callbacks (in the network task)
     void onAuthEvent(int code, const char *message, bool isError);
     void onStreamEvent(const String &event, const String &path, const String &data);
     void onStreamError(int code, const char *message);
+    void onRemoteStreamEvent(const String &event, const String &path, const String &data);
+    void onRemoteStreamError(int code, const char *message);
 
 private:
     static void taskEntry(void *arg);
@@ -43,9 +46,22 @@ private:
     void startApp();
     void process(CloudRequest &req);
     void rejectExpiredHead();
-    void maintainStream(bool online, bool ready);
-    void startStream();
-    void stopStream(const char *reason);
+    // One SSE connection (the config stream and the remote purchase request stream)
+    struct Stream
+    {
+        const char *name;
+        bool active = false;
+        bool restart = false;
+        uint32_t lastEventMs = 0;
+        uint32_t nextStartMs = 0;
+    };
+    void maintainStreams(bool online, bool ready);
+    void maintainStream(Stream &s, bool online, bool ready, bool reconnected);
+    void startStream(Stream &s);
+    void stopStream(Stream &s, const char *reason);
+    bool streamLive(const Stream &s) const;
+    bool remoteHeapOk();
+    void respondRemote(const String &id, const String &json);
 
     void fetchUser(const CloudRequest &req, CloudResponse &resp);
     void updateUser(const CloudRequest &req, CloudResponse &resp);
@@ -53,6 +69,8 @@ private:
     bool writeDeviceEvent(const CloudRequest &req, ErrorInfo &err);
     void trackWifiEvents(bool online);
     void fetchConfig(const CloudRequest &req, CloudResponse &resp);
+    bool writeRemoteStatus(const CloudRequest &req, ErrorInfo &err);
+    bool writeRemoteOnline(const CloudRequest &req, ErrorInfo &err);
 
     bool lastCallOk(const char *op, const char *path, ErrorInfo &out);
     void respond(const CloudResponse &resp);
@@ -70,12 +88,12 @@ private:
     bool wasReady_ = false;
     bool wasOnline_ = false;
 
-    // config stream (SSE) on the DB_CONF_PATH path
-    bool streamActive_ = false;
-    bool streamRestart_ = false;
-    uint32_t lastStreamEventMs_ = 0;
-    uint32_t nextStreamStartMs_ = 0;
+    // config stream (SSE) on the DB_CONF_PATH path, app purchase requests on DB_REMOTE_PATH<id>/req
+    Stream confStream_{"Config"};
+    Stream remoteStream_{"Remote request"};
     std::atomic<bool> liveUpdates_{false};
+    std::atomic<bool> remoteLive_{false};
+    bool remoteHeapWarned_ = false;
     uint32_t lastLogKey_ = 0;   // the latest users/<UID>/log key (strictly increasing)
     uint32_t lastEventKey_ = 0; // the latest /Log key
 
