@@ -648,8 +648,10 @@ void FirebaseCloud::onRemoteStreamError(int code, const char *message)
     LOGW(TAG, "Remote request stream error: %s (code %d)", message, code);
 }
 
-// Events: put "/" = all pending requests (stream start), put "/<id>" = a new request, put "/<id>" null = deleted.
-// Every request is forwarded to the controller, which decides (and answers + deletes it).
+// Events: put "/" = all pending requests (stream start), put "/<id>" = a new request, put "/<id>" null = deleted,
+// patch "/" {"<id>": null} = deleted by our own multi-path PATCH (status + delete).
+// Every request is forwarded to the controller, which decides (and answers + deletes it). Deletions must never be
+// forwarded: answering one would delete again, whose echo would be answered again - an endless write loop.
 void FirebaseCloud::onRemoteStreamEvent(const String &event, const String &path, const String &data)
 {
     remoteStream_.lastEventMs = millis();
@@ -672,6 +674,8 @@ void FirebaseCloud::onRemoteStreamEvent(const String &event, const String &path,
             return; // null: no pending request
         for (JsonPairConst kv : doc.as<JsonObjectConst>())
         {
+            if (kv.value().isNull())
+                continue; // deleted
             String json;
             serializeJson(kv.value(), json);
             respondRemote(String(kv.key().c_str()), json);
@@ -694,6 +698,9 @@ void FirebaseCloud::onRemoteStreamEvent(const String &event, const String &path,
 
 void FirebaseCloud::respondRemote(const String &id, const String &json)
 {
+    if (json.isEmpty() || json == "null")
+        return; // deleted - never answered (see onRemoteStreamEvent)
+
     CloudResponse resp;
     resp.op = CloudOp::RemoteVend;
     snprintf(resp.remoteId, sizeof(resp.remoteId), "%s", id.c_str());
