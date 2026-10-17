@@ -1,0 +1,32 @@
+#pragma once
+
+#include <Interfaces.h>
+#include <U8g2lib.h>
+
+// SH1106 128x64 OLED UI (U8g2, full frame buffer, UTF-8 with Hungarian accents).
+class OledUi : public IUi
+{
+public:
+    explicit OledUi(uint32_t i2cClockHz);
+
+    bool begin() override;
+    void show(const Screen &screen) override;
+    void setStatus(const StatusInfo &status) override;
+    void loop(uint32_t nowMs) override;
+
+private:
+    void render();
+    void drawStatusBar();
+    void drawBody();
+    void drawError();
+
+    U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2_;
+    uint32_t i2cClockHz_;
+    Screen screen_;
+    StatusInfo status_;
+    bool dirty_ = true;
+    uint32_t lastRenderMs_ = 0;
+    // on the error screen the details and the hint are shown alternately
+    bool showHint_ = false;
+    uint32_t altToggleMs_ = 0;
+};
