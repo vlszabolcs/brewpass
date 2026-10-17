@@ -19,6 +19,8 @@ public:
     // Short notice drawn over the current screen for durationMs (0 = until replaced by another notice);
     // the underlying screen is kept and comes back when the notice expires. Draws immediately.
     void showNotice(const char *title, const char *text, uint32_t durationMs);
+    // true if the "Fizess!" (pay) screen is shown without a notice over it
+    bool payScreenShown() const { return screen_.kind == ScreenKind::Idle && !noticeActive_; }
 
 private:
     void render();

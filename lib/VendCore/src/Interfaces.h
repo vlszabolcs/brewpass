@@ -86,6 +86,7 @@ struct StatusInfo
 {
     bool wifi = false;
     char ssid[33] = {0};
+    char ip[16] = {0}; // "192.168.50.101", empty if not connected
     int8_t rssi = 0;
     bool cloud = false;
     bool timeSynced = false;
@@ -118,6 +119,8 @@ public:
     virtual bool connected() const = 0;
     virtual void ssid(char *out, size_t outSize) const = 0;
     virtual int8_t rssi() const = 0;
+    // Current IP address as text ("" if not connected)
+    virtual void ip(char *out, size_t outSize) const = 0;
     // Incremented on every successful (re)connection - tells the controller that a full config fetch is due
     virtual uint32_t connectionId() const = 0;
     // Human-readable state (e.g. last disconnect reason) for detailed error reporting; empty if none
@@ -216,5 +219,5 @@ inline bool StatusInfo::operator==(const StatusInfo &o) const
 {
     return wifi == o.wifi && rssi == o.rssi && cloud == o.cloud && timeSynced == o.timeSynced &&
            machineReady == o.machineReady && freeMode == o.freeMode && price == o.price && liveConfig == o.liveConfig &&
-           strcmp(ssid, o.ssid) == 0 && strcmp(clock, o.clock) == 0;
+           strcmp(ssid, o.ssid) == 0 && strcmp(ip, o.ip) == 0 && strcmp(clock, o.clock) == 0;
 }

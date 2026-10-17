@@ -52,8 +52,10 @@ void WifiNetwork::maintain(uint32_t nowMs)
             wasConnected_ = true;
             // WiFi.SSID() may block (semaphore) - it must be queried OUTSIDE the critical section
             const String current = WiFi.SSID();
+            const String address = WiFi.localIP().toString();
             portENTER_CRITICAL(&lock_);
             snprintf(ssid_, sizeof(ssid_), "%s", current.c_str());
+            snprintf(ip_, sizeof(ip_), "%s", address.c_str());
             portEXIT_CRITICAL(&lock_);
             rssi_.store(static_cast<int8_t>(WiFi.RSSI()));
             attempts_.store(0);
@@ -74,6 +76,9 @@ void WifiNetwork::maintain(uint32_t nowMs)
     if (wasConnected_)
     {
         wasConnected_ = false;
+        portENTER_CRITICAL(&lock_);
+        ip_[0] = '\0';
+        portEXIT_CRITICAL(&lock_);
         const uint8_t reason = lastReason_.load();
         LOGW(TAG, "Kapcsolat megszakadt (ok: %u - %s)", reason, reasonText(reason));
     }
@@ -165,6 +170,13 @@ void WifiNetwork::ssid(char *out, size_t outSize) const
 {
     portENTER_CRITICAL(&lock_);
     snprintf(out, outSize, "%s", ssid_);
+    portEXIT_CRITICAL(&lock_);
+}
+
+void WifiNetwork::ip(char *out, size_t outSize) const
+{
+    portENTER_CRITICAL(&lock_);
+    snprintf(out, outSize, "%s", ip_);
     portEXIT_CRITICAL(&lock_);
 }
 

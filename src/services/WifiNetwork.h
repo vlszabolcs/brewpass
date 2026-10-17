@@ -25,6 +25,7 @@ public:
 
     bool connected() const override { return connected_.load(); }
     void ssid(char *out, size_t outSize) const override;
+    void ip(char *out, size_t outSize) const override;
     int8_t rssi() const override { return rssi_.load(); }
     uint32_t connectionId() const override { return connectionId_.load(); }
     void statusDetail(char *out, size_t outSize) const override;
@@ -46,6 +47,7 @@ private:
     std::atomic<uint32_t> connectionId_{0};
     mutable portMUX_TYPE lock_ = portMUX_INITIALIZER_UNLOCKED;
     char ssid_[33] = {0};
+    char ip_[16] = {0};
 
     bool wasConnected_ = false;
     uint32_t lastAttemptMs_ = 0;

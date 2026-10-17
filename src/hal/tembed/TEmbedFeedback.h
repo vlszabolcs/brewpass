@@ -11,11 +11,15 @@ class TEmbedFeedback : public PatternFeedback
 {
 public:
     TEmbedFeedback(uint8_t bclkPin, uint8_t lrclkPin, uint8_t doutPin, uint8_t ledPin, uint8_t ledCount,
-                   uint8_t ledBrightness, bool soundEnabled);
+                   uint8_t ledBrightness, bool soundDefaultOn);
 
     void begin() override;
     // all lights and sound off (before power off)
     void allOff();
+
+    // Sound on/off at runtime (LEDs stay active). The choice is saved to NVS.
+    void setSoundEnabled(bool on);
+    bool soundEnabled() const { return soundEnabled_; }
 
 protected:
     void toneOn(uint16_t freqHz) override;
@@ -30,7 +34,8 @@ private:
     uint8_t bclkPin_, lrclkPin_, doutPin_;
     Adafruit_NeoPixel leds_;
     uint8_t ledBrightness_;
-    bool soundEnabled_;
+    bool soundDefaultOn_;
+    bool soundEnabled_ = true;
     bool i2sOk_ = false;
     uint16_t freqHz_ = 0;
     uint32_t phase_ = 0;

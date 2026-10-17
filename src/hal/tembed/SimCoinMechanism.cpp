@@ -8,9 +8,9 @@ namespace
 }
 
 SimCoinMechanism::SimCoinMechanism(uint8_t vendDoneButtonPin, uint8_t machineButtonPin, uint32_t brewMs,
-                                   uint32_t longPressMs, uint32_t powerOffHoldMs, uint8_t pulseCount, uint32_t pulseLowMs,
-                                   uint32_t pulseHighMs)
-    : vendDoneButton_(vendDoneButtonPin, longPressMs), machineButton_(machineButtonPin, longPressMs, powerOffHoldMs),
+                                   uint32_t longPressMs, uint32_t encoderLongPressMs, uint32_t powerOffHoldMs,
+                                   uint8_t pulseCount, uint32_t pulseLowMs, uint32_t pulseHighMs)
+    : vendDoneButton_(vendDoneButtonPin, encoderLongPressMs), machineButton_(machineButtonPin, longPressMs, powerOffHoldMs),
       brewMs_(brewMs),
       pulseCount_(pulseCount), pulseLowMs_(pulseLowMs), pulseHighMs_(pulseHighMs)
 {
@@ -20,8 +20,9 @@ void SimCoinMechanism::begin()
 {
     vendDoneButton_.begin();
     machineButton_.begin();
-    LOGI(TAG, "Coffee machine simulation: encoder button = cup taken (machine ready again) | side button: short = machine "
-              "busy on/off, 1-5 s = ignore pulses on/off, 5 s = power off");
+    LOGI(TAG, "Coffee machine simulation: encoder button = cup taken (machine ready again), long press on the pay "
+              "screen = sound on/off | side button: short = machine busy on/off, 1-5 s = ignore pulses on/off, "
+              "5 s = power off");
 }
 
 bool SimCoinMechanism::startCreditPulses()
@@ -37,19 +38,19 @@ bool SimCoinMechanism::startCreditPulses()
 
 void SimCoinMechanism::loop(uint32_t nowMs)
 {
-    // --- gombok
-    switch (vendDoneButton_.update(nowMs))
+    // --- buttons
+    const Button::Event encoderEvent = vendDoneButton_.update(nowMs);
+    if (encoderEvent == Button::Event::Short || encoderEvent == Button::Event::Long)
     {
-    case Button::Event::Short:
-    case Button::Event::Long:
         if (brewing_)
         {
             brewing_ = false;
             LOGI(TAG, "Machine: cup taken (encoder button) -> inhibit LOW, machine ready again");
         }
-        break;
-    default:
-        break;
+        else if (encoderEvent == Button::Event::Long && encoderLongHandler_)
+        {
+            encoderLongHandler_();
+        }
     }
 
     switch (machineButton_.update(nowMs))

@@ -34,6 +34,11 @@ namespace msg
     constexpr const char *kOtaTitle = "Firmware frissítés";
     constexpr const char *kOtaProgressSuffix = "- ne kapcsold ki!";
 
+    // Sound on/off (test hardware)
+    constexpr const char *kSoundTitle = "Hang";
+    constexpr const char *kSoundOn = "bekapcsolva";
+    constexpr const char *kSoundOff = "kikapcsolva";
+
     // Status bar
     constexpr const char *kStateReady = "kész";
     constexpr const char *kStateBusy = "foglalt";

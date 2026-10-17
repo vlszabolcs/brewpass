@@ -111,6 +111,7 @@ include/
 
 | Button | Function |
 |---|---|
+| encoder push button, **long press (1 s) on the "Fizess!" screen** | sound on/off (a short notice is shown; the setting is saved and survives a restart) |
 | encoder push button | cup taken: after a successful credit entry the busy machine becomes ready again (inhibit → LOW). There is no automatic ready state (`kSimBrewMs = 0`); without a press for 180 s error **E52** follows |
 | side button, short | machine busy/fault on/off (inhibit held HIGH, for testing **E50**) |
 | side button, released after 1–5 s | "machine ignores the pulses" on/off (for testing **E51**) |
@@ -118,7 +119,7 @@ include/
 
 The simulated COIN pulses and the machine state appear on the serial console (`[SIM]` tag); the status bar of the display also shows the machine state.
 
-**LED ring:** blue = card accepted, green = success, red = error. The speaker is disabled (`kSoundEnabled = false` in `include/boards/BoardTEmbed.h`).
+**LED ring:** blue = card accepted, green = success, red = error. The speaker is on by default (`kSoundDefaultOn` in `include/boards/BoardTEmbed.h`) and can be toggled with a long encoder press on the pay screen; the LEDs always work.
 
 ## Error codes
 

@@ -52,6 +52,18 @@ namespace board
             LOGE("POWER", "Power off failed - the device keeps running");
             ui.showNotice(msg::kPowerOffFailedTitle, msg::kPowerOffFailedHint, 4000);
         }
+
+        // Encoder long press: sound on/off - only on the "Fizess!" (pay) screen
+        void toggleSound(TftUi &ui, TEmbedFeedback &feedback)
+        {
+            if (!ui.payScreenShown())
+                return;
+            const bool on = !feedback.soundEnabled();
+            feedback.setSoundEnabled(on);
+            ui.showNotice(msg::kSoundTitle, on ? msg::kSoundOn : msg::kSoundOff, 1500);
+            if (on)
+                feedback.play(FeedbackPattern::Success); // short confirmation beep
+        }
     } // namespace
 
     void earlyInit()
@@ -72,17 +84,19 @@ namespace board
     Hardware &hardware()
     {
         static Pn532Reader reader(kPn532IrqPin, kPn532ResetPin, kI2cSdaPin, kI2cSclPin, kI2cClockHz);
-        static SimCoinMechanism coin(kEncoderKeyPin, kUserKeyPin, kSimBrewMs, kSimLongPressMs, kPowerOffHoldMs,
-                                     settings::kCoinPulseCount, settings::kCoinPulseLowMs, settings::kCoinPulseHighMs);
+        static SimCoinMechanism coin(kEncoderKeyPin, kUserKeyPin, kSimBrewMs, kSimLongPressMs, kSoundToggleHoldMs,
+                                     kPowerOffHoldMs, settings::kCoinPulseCount, settings::kCoinPulseLowMs,
+                                     settings::kCoinPulseHighMs);
         static TftUi ui(kDisplayRotation);
         static TEmbedFeedback feedback(kI2sBclkPin, kI2sLrclkPin, kI2sDoutPin, kLedPin, kLedCount, kLedBrightness,
-                                       kSoundEnabled);
+                                       kSoundDefaultOn);
         static Hardware hw{reader, coin, ui, feedback};
         static bool wired = false;
         if (!wired)
         {
             wired = true;
             coin.setPowerOffHandler([]() { powerOff(ui, feedback); });
+            coin.setEncoderLongPressHandler([]() { toggleSound(ui, feedback); });
         }
         return hw;
     }

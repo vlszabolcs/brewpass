@@ -39,8 +39,10 @@ namespace board
     constexpr uint8_t kLedCount = 8;
     constexpr uint8_t kLedBrightness = 40;
 
-    // I2S speaker - false: no beeping, LED feedback only
-    constexpr bool kSoundEnabled = false;
+    // I2S speaker. Default state of the sound (the user toggles it with a long encoder press on the
+    // "Fizess!" screen; the choice is saved in NVS and survives a restart). LED feedback is always on.
+    constexpr bool kSoundDefaultOn = true;
+    constexpr uint32_t kSoundToggleHoldMs = 1000; // encoder button long press
     constexpr uint8_t kI2sBclkPin = 46;
     constexpr uint8_t kI2sLrclkPin = 40;
     constexpr uint8_t kI2sDoutPin = 7;

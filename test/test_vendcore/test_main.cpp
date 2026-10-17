@@ -28,7 +28,8 @@ struct FakeNet : INetwork
     uint32_t connId = 1;
     uint32_t connectionId() const override { return connId; }
     bool connected() const override { return up; }
-    void ssid(char *out, size_t n) const override { snprintf(out, n, "teszt"); }
+    void ssid(char *out, size_t n) const override { snprintf(out, n, "test"); }
+    void ip(char *out, size_t n) const override { snprintf(out, n, "192.168.1.10"); }
     int8_t rssi() const override { return -50; }
     void statusDetail(char *out, size_t n) const override { snprintf(out, n, "%s", ""); }
 };

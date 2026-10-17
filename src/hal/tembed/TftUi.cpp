@@ -211,6 +211,14 @@ void TftUi::drawBody()
     char buf[48];
     const int16_t w = kW - 2 * kMargin;
 
+    // device IP in the bottom-left corner of the waiting screens (handy for OTA)
+    if (status_.ip[0] &&
+        (screen_.kind == ScreenKind::Idle || screen_.kind == ScreenKind::FreeIdle || screen_.kind == ScreenKind::Boot))
+    {
+        snprintf(buf, sizeof(buf), "IP: %s", status_.ip);
+        text(kFontSmall, kGrey, 4, kH - 3, buf);
+    }
+
     switch (screen_.kind)
     {
     case ScreenKind::Idle:

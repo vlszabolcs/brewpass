@@ -88,7 +88,9 @@ void OledUi::render()
 void OledUi::drawStatusBar()
 {
     u8g2_.setFont(kFontSmall);
-    const char *left = status_.wifi ? status_.ssid : msg::kNoWifi;
+    // SSID and IP address alternate every 3 s (the clock redraws the bar every second)
+    const bool showIp = status_.wifi && status_.ip[0] && ((millis() / 3000) % 2 == 1);
+    const char *left = !status_.wifi ? msg::kNoWifi : (showIp ? status_.ip : status_.ssid);
     const int16_t clockW = status_.clock[0] ? u8g2_.getUTF8Width(status_.clock) : 0;
     textwrap::drawWrapped(u8g2_, 0, 9, kW - clockW - 4, 11, left, 1);
     if (clockW > 0)

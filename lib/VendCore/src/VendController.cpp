@@ -792,6 +792,7 @@ void VendController::updateStatus(uint32_t nowMs)
     if (st.wifi)
     {
         net_.ssid(st.ssid, sizeof(st.ssid));
+        net_.ip(st.ip, sizeof(st.ip));
         st.rssi = net_.rssi();
     }
     st.cloud = cloud_.ready();

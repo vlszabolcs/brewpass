@@ -1,6 +1,9 @@
 #include "TEmbedFeedback.h"
 
 #include <Log.h>
+#include <Preferences.h>
+
+#include "Settings.h"
 
 namespace
 {
@@ -9,12 +12,13 @@ namespace
     constexpr uint32_t kSampleRate = 16000;
     constexpr int16_t kAmplitude = 3000; // quiet, so the small speaker does not distort
     constexpr size_t kChunkFrames = 128;
+    constexpr const char *kPrefSound = "sound";
 } // namespace
 
 TEmbedFeedback::TEmbedFeedback(uint8_t bclkPin, uint8_t lrclkPin, uint8_t doutPin, uint8_t ledPin, uint8_t ledCount,
-                               uint8_t ledBrightness, bool soundEnabled)
+                               uint8_t ledBrightness, bool soundDefaultOn)
     : bclkPin_(bclkPin), lrclkPin_(lrclkPin), doutPin_(doutPin), leds_(ledCount, ledPin, NEO_GRB + NEO_KHZ800),
-      ledBrightness_(ledBrightness), soundEnabled_(soundEnabled)
+      ledBrightness_(ledBrightness), soundDefaultOn_(soundDefaultOn)
 {
 }
 
@@ -25,11 +29,15 @@ void TEmbedFeedback::begin()
     leds_.clear();
     leds_.show();
 
-    if (!soundEnabled_)
+    // saved sound setting (default: kSoundDefaultOn)
+    soundEnabled_ = soundDefaultOn_;
+    Preferences prefs;
+    if (prefs.begin(settings::kNvsNamespace, true))
     {
-        LOGI(TAG, "Sound disabled (kSoundEnabled = false), LED feedback only");
-        return;
+        soundEnabled_ = prefs.getBool(kPrefSound, soundDefaultOn_);
+        prefs.end();
     }
+    LOGI(TAG, "Sound %s", soundEnabled_ ? "on" : "off (LED feedback only)");
 
     i2s_config_t cfg = {};
     cfg.mode = static_cast<i2s_mode_t>(I2S_MODE_MASTER | I2S_MODE_TX);
@@ -57,8 +65,28 @@ void TEmbedFeedback::begin()
         LOGE(TAG, "I2S init failed - no sound, LED only");
 }
 
+void TEmbedFeedback::setSoundEnabled(bool on)
+{
+    soundEnabled_ = on;
+    if (!on)
+    {
+        toneOff();
+        if (i2sOk_)
+            i2s_zero_dma_buffer(kPort);
+    }
+    Preferences prefs;
+    if (prefs.begin(settings::kNvsNamespace, false))
+    {
+        prefs.putBool(kPrefSound, on);
+        prefs.end();
+    }
+    LOGI(TAG, "Sound %s", on ? "on" : "off");
+}
+
 void TEmbedFeedback::toneOn(uint16_t freqHz)
 {
+    if (!soundEnabled_)
+        return;
     freqHz_ = freqHz;
     phase_ = 0;
     service();

@@ -13,6 +13,8 @@
 //
 // Buttons:
 //   encoder button (short)  - cup taken: the machine goes from busy to ready again (inhibit -> LOW)
+//   encoder button (long)   - while brewing: cup taken; otherwise the request goes to the function set with
+//                             setEncoderLongPressHandler() (sound on/off on the "Fizess!" screen)
 //   side button (short)     - machine busy / fault on/off (inhibit held HIGH)
 //   side button (1-5 s)     - on release: "machine ignores the pulses" on/off (VendNotAcknowledged test)
 //   side button (5 s)       - power off request - handled by the function set with setPowerOffHandler()
@@ -20,10 +22,13 @@ class SimCoinMechanism : public ICoinMechanism
 {
 public:
     SimCoinMechanism(uint8_t vendDoneButtonPin, uint8_t machineButtonPin, uint32_t brewMs, uint32_t longPressMs,
-                     uint32_t powerOffHoldMs, uint8_t pulseCount, uint32_t pulseLowMs, uint32_t pulseHighMs);
+                     uint32_t encoderLongPressMs, uint32_t powerOffHoldMs, uint8_t pulseCount, uint32_t pulseLowMs,
+                     uint32_t pulseHighMs);
 
     // called when the side button is held for 5 s (from the main loop)
     void setPowerOffHandler(std::function<void()> handler) { powerOffHandler_ = std::move(handler); }
+    // long press of the encoder button outside brewing (from the main loop)
+    void setEncoderLongPressHandler(std::function<void()> handler) { encoderLongHandler_ = std::move(handler); }
 
     void begin() override;
     void loop(uint32_t nowMs) override;
@@ -36,6 +41,7 @@ private:
     Button vendDoneButton_;
     Button machineButton_;
     std::function<void()> powerOffHandler_;
+    std::function<void()> encoderLongHandler_;
     const uint32_t brewMs_;
     const uint8_t pulseCount_;
     const uint32_t pulseLowMs_;
