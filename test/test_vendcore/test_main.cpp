@@ -1,6 +1,7 @@
 // Native unit tests of the hardware independent VendCore logic:  pio test -e native
 #include <unity.h>
 
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <string>
@@ -9,6 +10,7 @@
 #include "CardDebouncer.h"
 #include "Messages.h"
 #include "PurchasePolicy.h"
+#include "ScreenSaver.h"
 #include "VendController.h"
 
 // ------------------------------------------------------------------ fakes
@@ -850,6 +852,114 @@ void test_remote_presence_heartbeat()
     TEST_ASSERT_FALSE(lastPresence(r)->remoteReady);
 }
 
+// ------------------------------------------------------------------ screen saver (OLED burn-in protection)
+
+void test_screensaver_activates_after_idle_and_wakes()
+{
+    ScreenSaverConfig cfg;
+    cfg.idleTimeoutMs = 60000;
+    ScreenSaver ss(cfg);
+    ss.activity(1000);
+    ss.update(1000);
+    TEST_ASSERT_FALSE(ss.active());
+    ss.update(60999);
+    TEST_ASSERT_FALSE(ss.active());
+    TEST_ASSERT_TRUE(ss.update(61000)); // turning on needs a redraw
+    TEST_ASSERT_TRUE(ss.active());
+    ss.activity(70000); // card tap
+    TEST_ASSERT_TRUE(ss.update(70000));
+    TEST_ASSERT_FALSE(ss.active());
+    ss.update(129999);
+    TEST_ASSERT_FALSE(ss.active()); // the timer restarted at the activity
+    ss.update(130000);
+    TEST_ASSERT_TRUE(ss.active());
+}
+
+void test_screensaver_disabled_with_zero_timeout()
+{
+    ScreenSaverConfig cfg;
+    cfg.idleTimeoutMs = 0;
+    ScreenSaver ss(cfg);
+    ss.update(10u * 3600u * 1000u);
+    TEST_ASSERT_FALSE(ss.active());
+}
+
+void test_screensaver_position_moves_and_stays_on_screen()
+{
+    ScreenSaverConfig cfg;
+    cfg.idleTimeoutMs = 1000;
+    cfg.moveIntervalMs = 5000;
+    ScreenSaver ss(cfg);
+    ss.update(1000);
+    TEST_ASSERT_TRUE(ss.active());
+    int16_t x0, y0, x, y;
+    ss.position(1000, 60, 24, 128, 64, x0, y0);
+    ss.position(5999, 60, 24, 128, 64, x, y);
+    TEST_ASSERT_EQUAL(x0, x); // same within a move interval
+    TEST_ASSERT_EQUAL(y0, y);
+    TEST_ASSERT_FALSE(ss.update(5999));
+    TEST_ASSERT_TRUE(ss.update(6000)); // a jump needs a redraw
+    int distinct = 0;
+    for (uint32_t t = 1000; t < 1000 + 50 * 5000; t += 5000)
+    {
+        ss.position(t, 60, 24, 128, 64, x, y);
+        TEST_ASSERT_TRUE(x >= 0 && x <= 128 - 60);
+        TEST_ASSERT_TRUE(y >= 0 && y <= 64 - 24);
+        if (x != x0 || y != y0)
+            ++distinct;
+    }
+    TEST_ASSERT_TRUE(distinct > 40);
+    // content larger than the screen: stays in the corner
+    ss.position(1000, 200, 100, 128, 64, x, y);
+    TEST_ASSERT_EQUAL(0, x);
+    TEST_ASSERT_EQUAL(0, y);
+}
+
+void test_pixel_shift_walks_whole_grid_one_pixel_at_a_time()
+{
+    ScreenSaverConfig cfg;
+    cfg.shiftIntervalMs = 60000;
+    cfg.maxShiftX = 2;
+    cfg.maxShiftY = 1;
+    ScreenSaver ss(cfg);
+    bool seen[5][3] = {};
+    int8_t px = 0, py = 0;
+    ss.shift(0, px, py);
+    for (uint32_t i = 0; i < 40; ++i)
+    {
+        int8_t dx, dy;
+        ss.shift(i * 60000 + 59999, dx, dy);
+        TEST_ASSERT_TRUE(dx >= -2 && dx <= 2 && dy >= -1 && dy <= 1);
+        TEST_ASSERT_TRUE(abs(dx - px) + abs(dy - py) <= 1);
+        seen[dx + 2][dy + 1] = true;
+        px = dx;
+        py = dy;
+    }
+    for (auto &c : seen)
+        for (bool b : c)
+            TEST_ASSERT_TRUE(b);
+}
+
+void test_pixel_shift_buffer()
+{
+    // 16 x 16 pixels = 2 pages of 16 bytes
+    uint8_t buf[32] = {};
+    buf[0 * 16 + 3] = 0x01;  // pixel (3, 0)
+    buf[0 * 16 + 15] = 0x80; // pixel (15, 7)
+    pixelshift::shiftPages(buf, 16, 2, 2, 1);
+    TEST_ASSERT_EQUAL_HEX8(0x02, buf[5]);      // (5, 1)
+    TEST_ASSERT_EQUAL_HEX8(0x00, buf[3]);
+    TEST_ASSERT_EQUAL_HEX8(0x00, buf[16 + 15]); // (17, 8): moved off the screen
+    for (int i = 0; i < 32; ++i)
+        if (i != 5)
+            TEST_ASSERT_EQUAL_HEX8(0x00, buf[i]);
+    pixelshift::shiftPages(buf, 16, 2, -1, 7);
+    TEST_ASSERT_EQUAL_HEX8(0x01, buf[16 + 4]); // (4, 8): across the page boundary
+    pixelshift::shiftPages(buf, 16, 2, 0, -8);
+    TEST_ASSERT_EQUAL_HEX8(0x01, buf[4]); // back to (4, 0)
+    TEST_ASSERT_EQUAL_HEX8(0x00, buf[16 + 4]);
+}
+
 int main(int, char **)
 {
     UNITY_BEGIN();
@@ -888,5 +998,10 @@ int main(int, char **)
     RUN_TEST(test_remote_malformed_request);
     RUN_TEST(test_remote_cuts_result_screen_short);
     RUN_TEST(test_remote_presence_heartbeat);
+    RUN_TEST(test_screensaver_activates_after_idle_and_wakes);
+    RUN_TEST(test_screensaver_disabled_with_zero_timeout);
+    RUN_TEST(test_screensaver_position_moves_and_stays_on_screen);
+    RUN_TEST(test_pixel_shift_walks_whole_grid_one_pixel_at_a_time);
+    RUN_TEST(test_pixel_shift_buffer);
     return UNITY_END();
 }
