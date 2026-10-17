@@ -73,6 +73,7 @@ include/
                                    device status log: boot, wifi, config, reader, error, ota
 /conf                              price, free (+ coffeeBeans - not used by the device); watched by a stream
 /stat/free/<YYYYMMDD> : 37         daily number of free-mode purchases (server-side +1)
+/remote/<dev>/req|status|online    purchase from the app (see "Purchase from the app" below)
 ```
 
 - **Per card tap:** `GET /users/<UID>/credit` and `GET /users/<UID>/name`, so the log is never downloaded. (`shallow=true` cannot be used for this: it replaces numbers with `true` too.)
@@ -90,6 +91,7 @@ include/
   | `reader` | reader fault and recovery (at most every 5 minutes) |
   | `error` | E25, E51, E52, E53 and an uncertain charge |
   | `ota` | failed update |
+  | `remote` | the app request stream could not start (not enough heap) |
 
   Events created before the time sync / network may wait up to 30 minutes in the queue; they are written with the time of writing.
 
@@ -106,6 +108,75 @@ include/
 5. The machine raises inhibit HIGH (credit accepted). When it goes back LOW, the drink is done.
 
 **Free mode:** if inhibit is LOW, the machine gets credit right away, then the daily counter (`stat/free/<YYYYMMDD>`) is incremented.
+
+## Purchase from the app ("virtual card tap")
+
+The app does **not** change the credit. It only asks the machine to act as if the card had been tapped; the
+machine runs the request through the same state machine as a physical card (charge before the pulses, no pulses
+after a failed write). There is no presence check: whoever knows a card UID can buy on it (decided on purpose).
+
+`<dev>` is `REMOTE_DEVICE_ID` from `secrets.h` (default `brewpass`); the paths follow
+`coffeeapp/database.rules.json` of the project.
+
+### 1. Is the machine available? `remote/<dev>/online`
+
+```
+remote/<dev>/online = {
+  "ts":    1760700000000,   // server time (ms) of the last write
+  "ready": true,            // a request would be taken right now
+  "free":  false,           // free mode: no need to pay, the app should say so
+  "price": 100              // Ft
+}
+```
+
+Written every 60 s and within ~2 s when `ready` changes. `ready` is true only if the machine is idle, in normal
+(paid) mode, accepts credit (inhibit LOW) and the request stream is connected. Treat the machine as offline if
+`ts` is older than ~2.5 minutes (compare with the app's server time offset, `.info/serverTimeOffset`).
+
+### 2. Request: `remote/<dev>/req/<pushId>`
+
+```kotlin
+val ref = db.getReference("remote/$dev/req").push()
+ref.setValue(mapOf("cardUid" to "04A1B2C3", "ts" to ServerValue.TIMESTAMP))
+val id = ref.key   // listen to remote/$dev/status/$id
+```
+
+- Exactly two fields: `cardUid` (upper-case hex, as in `users/<UID>`) and `ts` = **server timestamp**
+  (the rules reject anything else, a client time included, and an unknown card).
+- Only new requests can be written; the machine deletes the request as soon as it has handled it.
+
+### 3. Progress: `remote/<dev>/status/<pushId>`
+
+```
+{ "state": "accepted", "ts": ... }                       taken over, user being checked ("Ellenőrzés...")
+{ "state": "charged",  "ts": ..., "credit": 350 }        charged, credit sent: "Válassz italt a gépen!"
+{ "state": "done",     "ts": ..., "credit": 350 }        the machine finished the drink
+{ "state": "error",    "ts": ..., "code": 31 }           refused / failed, see the codes below
+{ "state": "error",    "ts": ..., "code": 51, "credit": 350 }  failed AFTER the charge (credit present)
+```
+
+The states only move forward: `accepted` → `charged` → `done` | `error` (an `error` may come at any point).
+`credit` is the credit after the charge and is only present once the account was charged.
+If no status arrives within 30 s, the app should report "the machine did not answer".
+
+| `code` | Meaning for the app | Charged? |
+|---|---|---|
+| 33 | refused: the machine is busy / not ready, free mode, a card was tapped at the same time, or the request is older than 20 s | no |
+| 50 | the machine does not accept credit (inhibit HIGH) | no |
+| 24 | malformed request | no |
+| 30 / 31 | unregistered card / not enough credit | no |
+| 20, 22, 23, 25 | database problem, nothing was charged (23 while charging: uncertain, see `/Log`) | no |
+| 51 / 52 / 53 | charged, but the machine did not take the credit / got stuck / raised inhibit | **yes** |
+
+Rules on the machine side: a request is taken only in the idle state (an error/result screen is cut short), it
+is run at most once (the last handled `ts` + push key is saved in NVS, so a re-delivered request after a stream
+restart or a reboot is only deleted), and a refused request does not disturb the display. Status entries are not
+deleted by the machine (a few dozen bytes per purchase).
+
+**Memory:** the request stream is a third TLS connection (~40 KB). It is only started if at least
+`kRemoteStreamMinFreeHeap` (70 KB) heap is free; otherwise `/Log` gets a `remote` event and `online.ready` stays
+false. The free heap is printed on the serial console every minute (`[APP] State: ... | heap: ...`).
+`kRemoteVendEnabled = false` in `include/Settings.h` turns the feature off.
 
 ## Test hardware: simulating the coffee machine
 
@@ -133,6 +204,7 @@ The display shows `HIBA E<code>` + a short Hungarian title + what to do. The tec
 | E22 / E23 / E24 | database request error / timeout / invalid data (e.g. missing `credit`) |
 | E25 | updating the credit failed - **no charge and no credit hand-over** |
 | E30 / E31 | unregistered card / not enough credit |
+| E33 | app purchase request refused (machine busy, free mode or request expired) - only sent to the app |
 | E40 | RFID reader fault (automatic recovery) |
 | E50 | the machine does not accept credit (inhibit HIGH) |
 | E51 | after the pulses the machine did not signal that it accepted the credit (2 s) |

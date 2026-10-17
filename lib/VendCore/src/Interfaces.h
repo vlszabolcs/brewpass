@@ -146,6 +146,9 @@ enum class CloudOp : uint8_t
     FetchConfig,
     ConfigChanged, // unsolicited (stream) config change - only appears as a response
     DeviceEvent,   // device status log: /Log/<epoch> = {"e": event, "d": detail}
+    RemoteVend,    // unsolicited (stream) purchase request from the app - only appears as a response
+    RemoteStatus,  // remote purchase progress (status/<id>) and/or deletion of the request (req/<id>)
+    RemoteOnline,  // remote purchase availability heartbeat (online)
 };
 
 struct CloudRequest
@@ -163,6 +166,16 @@ struct CloudRequest
     // DeviceEvent
     char event[12] = {0};
     char detail[96] = {0};
+    // RemoteStatus (credit: the credit after the charge, only written if charged)
+    char remoteId[kRemoteIdSize] = {0};
+    RemoteState remoteState = RemoteState::None;
+    bool deleteRemoteRequest = false;
+    bool charged = false;
+    uint16_t errorCode = 0;
+    // RemoteOnline
+    bool remoteReady = false;
+    bool freeMode = false;
+    int32_t price = 0;
 };
 
 // Builds a device status event (timestamp = 0: the worker fills it in when writing)
@@ -197,6 +210,10 @@ struct CloudResponse
     // For ConfigChanged: which fields were part of the change
     bool hasPrice = false;
     bool hasFree = false;
+    // RemoteVend: push key and server timestamp (ms) of the request; the card UID is in user.uid.
+    // ok=false: malformed request (error tells why), it is refused and deleted.
+    char remoteId[kRemoteIdSize] = {0};
+    uint64_t remoteTsMs = 0;
 };
 
 class ICloud
@@ -213,6 +230,8 @@ public:
     virtual ErrorInfo statusError() const = 0;
     // true if config changes are watched by a live connection (stream)
     virtual bool liveUpdates() const { return false; }
+    // true if app purchase requests are watched by a live connection (stream)
+    virtual bool remoteLive() const { return false; }
 };
 
 inline bool StatusInfo::operator==(const StatusInfo &o) const

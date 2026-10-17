@@ -16,6 +16,14 @@
 #define DB_STAT_PATH "/stat/"
 #endif
 
+#ifndef DB_REMOTE_PATH
+#define DB_REMOTE_PATH "/remote/" // older secrets.h: default path of the app purchase requests
+#endif
+
+#ifndef REMOTE_DEVICE_ID
+#define REMOTE_DEVICE_ID "brewpass" // <dev> in /remote/<dev>/... - the app must use the same id
+#endif
+
 #ifndef OTA_PASSWORD
 #define OTA_PASSWORD "" // older secrets.h: OTA disabled
 #endif
@@ -24,7 +32,7 @@
 namespace settings
 {
     constexpr const char *kFirmwareName = "BrewPass";
-    constexpr const char *kFirmwareVersion = "2.0.0";
+    constexpr const char *kFirmwareVersion = "2.1.0";
     constexpr const char *kHostname = "brewpass"; // mDNS: brewpass.local (OTA)
     // NVS namespace - kept from the old project name (rfidValidator), so the saved price/mode survives the rename
     constexpr const char *kNvsNamespace = "rfidval";
@@ -64,6 +72,13 @@ namespace settings
     // RFID reader health check
     constexpr uint32_t kReaderHealthCheckMs = 5000;
     constexpr uint32_t kReaderRecoverRetryMs = 3000;
+
+    // Remote purchase from the app ("virtual card tap", /remote/<dev>/req stream).
+    // The request stream is a third TLS connection (~40 KB heap): it is only started if at least this much
+    // heap is free, so the card purchases never run out of memory because of it.
+    constexpr bool kRemoteVendEnabled = true;
+    constexpr uint32_t kRemoteStreamMinFreeHeap = 70000;
+    constexpr uint32_t kRemoteStreamHeapRetryMs = 60000;
 
     // Diagnostics
     constexpr uint32_t kHeapReportIntervalMs = 60000;

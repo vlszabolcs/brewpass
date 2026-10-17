@@ -63,6 +63,50 @@ struct DeviceConfig
     bool operator!=(const DeviceConfig &o) const { return !(*this == o); }
 };
 
+// ---------------------------------------------------------------- Remote purchase ("virtual card tap")
+// The app writes /remote/<deviceId>/req/<id> = {cardUid, ts}, the device runs it through the same purchase
+// flow as a physical card and reports progress in /remote/<deviceId>/status/<id>. Format: README.md.
+
+// RTDB push keys are 20 characters
+constexpr size_t kRemoteIdSize = 32;
+
+// Progress of a remote purchase, written to status/<id>/state
+enum class RemoteState : uint8_t
+{
+    None,     // nothing to write (only the request is deleted)
+    Accepted, // "accepted": taken over, user being checked
+    Charged,  // "charged": credit deducted, credit pulses being sent
+    Done,     // "done": the machine finished the drink
+    Error,    // "error": see the code (E-number); credit is present if the account was already charged
+};
+
+inline const char *remoteStateName(RemoteState s)
+{
+    switch (s)
+    {
+    case RemoteState::None: return "";
+    case RemoteState::Accepted: return "accepted";
+    case RemoteState::Charged: return "charged";
+    case RemoteState::Done: return "done";
+    case RemoteState::Error: return "error";
+    }
+    return "";
+}
+
+// The last handled remote request (server timestamp + push key). Requests at or before it are not run again,
+// even if the stream re-delivers them (restart, reboot) - saved to NVS so a reboot cannot charge twice.
+struct RemoteMark
+{
+    uint64_t tsMs = 0;
+    char id[kRemoteIdSize] = {0};
+
+    // true if (ts, id) was already handled
+    bool covers(uint64_t ts, const char *reqId) const
+    {
+        return ts < tsMs || (ts == tsMs && strcmp(reqId, id) <= 0);
+    }
+};
+
 // Log events.
 // A purchase is logged together with the credit update: users/<UID>/log/<epoch> = remaining credit.
 // A separate log write only exists for free purchases (daily counter: stat/free/<YYYYMMDD>).
