@@ -123,7 +123,7 @@ void OledUi::setContrast(uint8_t value)
 // Screen saver: a small text (what the screen is about + the clock) that jumps to a new place regularly
 void OledUi::drawSaver(uint32_t nowMs)
 {
-    char line1[32];
+    char line1[64];
     switch (screen_.kind)
     {
     case ScreenKind::Idle:
