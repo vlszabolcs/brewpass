@@ -33,4 +33,4 @@
 #define DB_REMOTE_PATH "/remote/" // + <REMOTE_DEVICE_ID>/req|status|online -> purchase from the app (README)
 
 // Id of this machine in /remote/<id>/ (purchase from the app). Several machines need different ids.
-#define REMOTE_DEVICE_ID "brewpass"
+#define REMOTE_DEVICE_ID "machine1"

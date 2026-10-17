@@ -86,7 +86,7 @@ namespace
         return p;
     }
 
-    // "/remote/" + "brewpass" -> "/remote/brewpass"
+    // "/remote/" + "machine1" -> "/remote/machine1"
     String remoteBasePath() { return String(DB_REMOTE_PATH) + REMOTE_DEVICE_ID; }
 
     // Card UID in the users/<UID> key format (CardUid::toHex): upper-case hex, 4-10 bytes

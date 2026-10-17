@@ -115,7 +115,7 @@ The app does **not** change the credit. It only asks the machine to act as if th
 machine runs the request through the same state machine as a physical card (charge before the pulses, no pulses
 after a failed write). There is no presence check: whoever knows a card UID can buy on it (decided on purpose).
 
-`<dev>` is `REMOTE_DEVICE_ID` from `secrets.h` (default `brewpass`); the paths follow
+`<dev>` is `REMOTE_DEVICE_ID` from `secrets.h` (default `machine1`, the id the admin app's user module uses); the paths follow
 `coffeeapp/database.rules.json` of the project.
 
 ### 1. Is the machine available? `remote/<dev>/online`

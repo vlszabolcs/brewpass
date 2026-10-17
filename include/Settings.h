@@ -21,7 +21,7 @@
 #endif
 
 #ifndef REMOTE_DEVICE_ID
-#define REMOTE_DEVICE_ID "brewpass" // <dev> in /remote/<dev>/... - the app must use the same id
+#define REMOTE_DEVICE_ID "machine1" // <dev> in /remote/<dev>/... - the app must use the same id
 #endif
 
 #ifndef OTA_PASSWORD
