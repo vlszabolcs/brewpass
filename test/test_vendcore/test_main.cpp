@@ -140,6 +140,22 @@ struct FakeCloud : ICloud
         case CloudOp::WriteLog:
             resp.ok = true;
             break;
+        case CloudOp::Transfer:
+            snprintf(resp.user.uid, sizeof(resp.user.uid), "%s", userExists ? r.uid : r.peerUid);
+            snprintf(resp.transferTo, sizeof(resp.transferTo), "%s", r.peerUid);
+            resp.transferAmount = r.amount;
+            if (!userExists)
+                resp.notFound = true;
+            else if (!PurchasePolicy::canTransfer(userCredit, r.amount))
+                resp.error = ErrorInfo::make(ErrorCode::CreditLow, userCredit, "credit %ld", (long)userCredit);
+            else if (!updateOk)
+                resp.error = ErrorInfo::make(ErrorCode::CloudRequest, 401, "Permission denied");
+            else
+            {
+                resp.ok = true;
+                resp.user.credit = userCredit - r.amount;
+            }
+            break;
         default:
             break;
         }
@@ -821,6 +837,128 @@ void test_remote_cuts_result_screen_short()
     TEST_ASSERT_EQUAL(2, r.cloud.count(CloudOp::FetchUser));
 }
 
+// ------------------------------------------------------------------ credit transfer (app)
+
+void pushTransfer(Rig &r, const char *id, const char *to, int32_t amount, const char *from = "04A1B2C3")
+{
+    pushRemote(r, id, from);
+    CloudResponse &req = r.cloud.responses.back();
+    req.transfer = true;
+    snprintf(req.transferTo, sizeof(req.transferTo), "%s", to);
+    req.transferAmount = amount;
+}
+
+void test_transfer_policy()
+{
+    TEST_ASSERT_TRUE(PurchasePolicy::canTransfer(500, 500));
+    TEST_ASSERT_FALSE(PurchasePolicy::canTransfer(400, 500)); // no going negative, unlike a purchase
+    TEST_ASSERT_FALSE(PurchasePolicy::canTransfer(500, 150)); // whole hundreds only
+    TEST_ASSERT_FALSE(PurchasePolicy::canTransfer(500, 0));
+    TEST_ASSERT_FALSE(PurchasePolicy::canTransfer(500, -100));
+}
+
+void test_transfer_happy_path()
+{
+    Rig r;
+    r.start();
+    pushTransfer(r, "-Nxfer", "11223344", 200);
+    r.step();
+    const CloudRequest *t = r.cloud.lastOf(CloudOp::Transfer);
+    TEST_ASSERT_NOT_NULL(t);
+    TEST_ASSERT_EQUAL_STRING("04A1B2C3", t->uid);
+    TEST_ASSERT_EQUAL_STRING("11223344", t->peerUid);
+    TEST_ASSERT_EQUAL_INT32(200, t->amount);
+    TEST_ASSERT_EQUAL(0, r.cloud.count(CloudOp::FetchUser));
+    r.step();
+    TEST_ASSERT_EQUAL(S::ShowResult, r.state());
+    TEST_ASSERT_EQUAL(0, r.coin.pulseTrains); // no drink
+    TEST_ASSERT_EQUAL_STRING("Átutalva: 200 Ft", r.ui.last().text);
+    TEST_ASSERT_EQUAL_INT32(300, r.ui.last().amount);
+
+    auto st = remoteStatuses(r, "-Nxfer");
+    TEST_ASSERT_EQUAL(2, (int)st.size());
+    TEST_ASSERT_EQUAL(RemoteState::Accepted, st[0].remoteState);
+    TEST_ASSERT_TRUE(st[0].deleteRemoteRequest);
+    TEST_ASSERT_EQUAL(RemoteState::Done, st[1].remoteState);
+    TEST_ASSERT_TRUE(st[1].charged);
+    TEST_ASSERT_EQUAL_INT32(300, st[1].credit);
+}
+
+void test_transfer_low_credit_and_unknown_card()
+{
+    Rig r;
+    r.start();
+    r.cloud.userCredit = 100;
+    pushTransfer(r, "-Nlow", "11223344", 200);
+    r.step(2);
+    auto st = remoteStatuses(r, "-Nlow");
+    TEST_ASSERT_EQUAL(RemoteState::Error, st.back().remoteState);
+    TEST_ASSERT_EQUAL(31, st.back().errorCode);
+    TEST_ASSERT_FALSE(st.back().charged);
+
+    Rig r2;
+    r2.start();
+    r2.cloud.userExists = false;
+    pushTransfer(r2, "-Nunk", "11223344", 200);
+    r2.step(2);
+    TEST_ASSERT_EQUAL(30, remoteStatuses(r2, "-Nunk").back().errorCode);
+
+    Rig r3;
+    r3.start();
+    r3.cloud.updateOk = false;
+    pushTransfer(r3, "-Nfail", "11223344", 200);
+    r3.step(2);
+    TEST_ASSERT_EQUAL(25, remoteStatuses(r3, "-Nfail").back().errorCode);
+    TEST_ASSERT_FALSE(remoteStatuses(r3, "-Nfail").back().charged);
+}
+
+void test_transfer_invalid_request_refused()
+{
+    Rig r;
+    r.start();
+    pushTransfer(r, "-Nodd", "11223344", 150);
+    r.step();
+    TEST_ASSERT_EQUAL(24, remoteStatuses(r, "-Nodd")[0].errorCode);
+    pushTransfer(r, "-Nself", "04A1B2C3", 200);
+    r.step();
+    TEST_ASSERT_EQUAL(24, remoteStatuses(r, "-Nself")[0].errorCode);
+    TEST_ASSERT_EQUAL(0, r.cloud.count(CloudOp::Transfer));
+    TEST_ASSERT_EQUAL(S::Idle, r.state());
+}
+
+void test_transfer_blocks_cards_and_requests()
+{
+    Rig r;
+    r.start();
+    r.cloud.autoRespond = false;
+    pushTransfer(r, "-Nslow", "11223344", 200);
+    r.step();
+    TEST_ASSERT_EQUAL(S::Transferring, r.state());
+    r.tap();
+    r.step();
+    pushRemote(r, "-Nzbuy");
+    r.step();
+    TEST_ASSERT_EQUAL(0, r.cloud.count(CloudOp::FetchUser)); // the sender's credit cannot change in between
+    TEST_ASSERT_EQUAL(33, remoteStatuses(r, "-Nzbuy")[0].errorCode);
+    TEST_ASSERT_EQUAL(S::Transferring, r.state());
+
+    r.step(1, r.timings.updateUserTimeoutMs);
+    TEST_ASSERT_EQUAL(S::ShowResult, r.state());
+    TEST_ASSERT_EQUAL(23, remoteStatuses(r, "-Nslow").back().errorCode);
+}
+
+void test_transfer_works_in_free_mode_and_with_inhibit()
+{
+    Rig r;
+    r.cloud.cfg.freeMode = true;
+    r.coin.accepting = false; // a drink in progress: no credit needed for a transfer
+    r.start();
+    r.step(3);
+    pushTransfer(r, "-Nfree", "11223344", 100);
+    r.step(2);
+    TEST_ASSERT_EQUAL(RemoteState::Done, remoteStatuses(r, "-Nfree").back().remoteState);
+}
+
 const CloudRequest *lastPresence(Rig &r) { return r.cloud.lastOf(CloudOp::RemoteOnline); }
 
 void test_remote_presence_heartbeat()
@@ -888,5 +1026,11 @@ int main(int, char **)
     RUN_TEST(test_remote_malformed_request);
     RUN_TEST(test_remote_cuts_result_screen_short);
     RUN_TEST(test_remote_presence_heartbeat);
+    RUN_TEST(test_transfer_policy);
+    RUN_TEST(test_transfer_happy_path);
+    RUN_TEST(test_transfer_low_credit_and_unknown_card);
+    RUN_TEST(test_transfer_invalid_request_refused);
+    RUN_TEST(test_transfer_blocks_cards_and_requests);
+    RUN_TEST(test_transfer_works_in_free_mode_and_with_inhibit);
     return UNITY_END();
 }

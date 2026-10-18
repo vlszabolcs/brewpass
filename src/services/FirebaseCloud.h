@@ -65,6 +65,7 @@ private:
 
     void fetchUser(const CloudRequest &req, CloudResponse &resp);
     void updateUser(const CloudRequest &req, CloudResponse &resp);
+    void transfer(const CloudRequest &req, CloudResponse &resp);
     bool writeLog(const CloudRequest &req, ErrorInfo &err);
     bool writeDeviceEvent(const CloudRequest &req, ErrorInfo &err);
     void trackWifiEvents(bool online);

@@ -3,6 +3,7 @@
 #include <ArduinoJson.h>
 #include <FirebaseClient.h>
 #include <Log.h>
+#include <PurchasePolicy.h>
 #include <WiFiClientSecure.h>
 #include <esp_task_wdt.h>
 
@@ -136,6 +137,7 @@ namespace
         case CloudOp::RemoteVend: return "App request (stream)";
         case CloudOp::RemoteStatus: return "Write app status";
         case CloudOp::RemoteOnline: return "Write app heartbeat";
+        case CloudOp::Transfer: return "Transfer";
         }
         return "?";
     }
@@ -385,6 +387,7 @@ void FirebaseCloud::process(CloudRequest &req)
     {
     case CloudOp::FetchUser: fetchUser(req, resp); break;
     case CloudOp::UpdateUser: updateUser(req, resp); break;
+    case CloudOp::Transfer: transfer(req, resp); break;
     case CloudOp::FetchConfig: fetchConfig(req, resp); break;
     case CloudOp::WriteLog:
     case CloudOp::DeviceEvent:
@@ -711,15 +714,21 @@ void FirebaseCloud::respondRemote(const String &id, const String &json)
     snprintf(resp.user.uid, sizeof(resp.user.uid), "%s", uid);
     const double ts = parsed && doc["ts"].is<double>() ? doc["ts"].as<double>() : 0.0;
     resp.remoteTsMs = ts > 0 ? static_cast<uint64_t>(ts) : 0;
+    // a recipient makes it a credit transfer (the controller checks the amount)
+    const char *to = parsed ? (doc["to"] | "") : "";
+    resp.transfer = to[0] != '\0';
+    snprintf(resp.transferTo, sizeof(resp.transferTo), "%s", to);
+    resp.transferAmount = parsed && doc["amount"].is<int32_t>() ? doc["amount"].as<int32_t>() : 0;
 
     if (id.length() >= sizeof(resp.remoteId))
         resp.error = ErrorInfo::make(ErrorCode::CloudData, 0, "request id too long: %.40s", id.c_str());
-    else if (!parsed || !validCardUid(uid) || resp.remoteTsMs == 0)
+    else if (!parsed || !validCardUid(uid) || resp.remoteTsMs == 0 || (resp.transfer && !validCardUid(to)))
         resp.error = ErrorInfo::make(ErrorCode::CloudData, 0, "invalid request %s: %.60s", id.c_str(), json.c_str());
     else
         resp.ok = true;
 
-    LOGI(TAG, "App request %s: card %s, ts %llu%s", resp.remoteId, resp.user.uid, (unsigned long long)resp.remoteTsMs,
+    LOGI(TAG, "App request %s: card %s, ts %llu%s%s", resp.remoteId, resp.user.uid, (unsigned long long)resp.remoteTsMs,
+         resp.transfer ? (String(", transfer to ") + to + " " + resp.transferAmount + " Ft").c_str() : "",
          resp.ok ? "" : " (INVALID)");
     respond(resp);
 }
@@ -765,6 +774,7 @@ bool FirebaseCloud::writeRemoteOnline(const CloudRequest &req, ErrorInfo &err)
     doc["ready"] = req.remoteReady;
     doc["free"] = req.freeMode;
     doc["price"] = req.price;
+    doc["transfer"] = true; // this firmware handles credit transfer requests
     String body;
     serializeJson(doc, body);
     LOGD(TAG, "PUT %s %s", path.c_str(), body.c_str());
@@ -866,6 +876,78 @@ void FirebaseCloud::updateUser(const CloudRequest &req, CloudResponse &resp)
     lastLogKey_ = key;
     snprintf(resp.user.uid, sizeof(resp.user.uid), "%s", req.uid);
     resp.user.credit = req.credit;
+    resp.ok = true;
+}
+
+void FirebaseCloud::transfer(const CloudRequest &req, CloudResponse &resp)
+{
+    // Reads both credits, then ONE multi-path PATCH on the database root changes both cards:
+    //   users/<from>: credit, log/<k> = new credit, xfer/<k> = {"amount": -x, "peer": recipient's name}
+    //   users/<to>:   credit, log/<k> = new credit, xfer/<k> = {"amount": +x, "peer": sender's name}
+    // xfer/<k> tells the apps that the log entry with the same key is a transfer, not a purchase / top-up.
+    snprintf(resp.transferTo, sizeof(resp.transferTo), "%s", req.peerUid);
+    resp.transferAmount = req.amount;
+
+    CloudResponse from;
+    fetchUser(req, from);
+    if (!from.ok)
+    {
+        resp.user = from.user;
+        resp.notFound = from.notFound;
+        resp.error = from.error;
+        return;
+    }
+    CloudRequest toReq = req;
+    snprintf(toReq.uid, sizeof(toReq.uid), "%s", req.peerUid);
+    CloudResponse to;
+    fetchUser(toReq, to);
+    if (!to.ok)
+    {
+        resp.user = to.user;
+        resp.notFound = to.notFound;
+        resp.error = to.error;
+        return;
+    }
+    if (!PurchasePolicy::canTransfer(from.user.credit, req.amount))
+    {
+        resp.user = from.user;
+        resp.error = ErrorInfo::make(ErrorCode::CreditLow, from.user.credit, "Transfer %ld Ft, credit: %ld Ft",
+                                     (long)req.amount, (long)from.user.credit);
+        return;
+    }
+
+    uint32_t key = req.timestamp;
+    if (key <= lastLogKey_)
+        key = lastLogKey_ + 1;
+    const int32_t fromCredit = from.user.credit - req.amount;
+    const int32_t toCredit = to.user.credit + req.amount;
+
+    String users = DB_USER_PATH; // "/users/" -> "users/" (keys of a PATCH on the root)
+    while (users.startsWith("/"))
+        users.remove(0, 1);
+    const String k = String(key);
+    const String a = users + req.uid + "/";
+    const String b = users + req.peerUid + "/";
+    JsonDocument doc;
+    doc[a + "credit"] = fromCredit;
+    doc[a + "log/" + k] = fromCredit;
+    doc[a + "xfer/" + k + "/amount"] = -req.amount;
+    doc[a + "xfer/" + k + "/peer"] = to.user.name;
+    doc[b + "credit"] = toCredit;
+    doc[b + "log/" + k] = toCredit;
+    doc[b + "xfer/" + k + "/amount"] = req.amount;
+    doc[b + "xfer/" + k + "/peer"] = from.user.name;
+    String body;
+    serializeJson(doc, body);
+
+    LOGI(TAG, "PATCH / %s", body.c_str());
+    db.update(aClient, "/", object_t(body));
+    if (!lastCallOk(opName(req.op), "/", resp.error))
+        return;
+
+    lastLogKey_ = key;
+    resp.user = from.user;
+    resp.user.credit = fromCredit;
     resp.ok = true;
 }
 

@@ -149,6 +149,7 @@ enum class CloudOp : uint8_t
     RemoteVend,    // unsolicited (stream) purchase request from the app - only appears as a response
     RemoteStatus,  // remote purchase progress (status/<id>) and/or deletion of the request (req/<id>)
     RemoteOnline,  // remote purchase availability heartbeat (online)
+    Transfer,      // credit transfer uid -> peerUid (amount): reads both credits, writes both in ONE PATCH
 };
 
 struct CloudRequest
@@ -172,6 +173,9 @@ struct CloudRequest
     bool deleteRemoteRequest = false;
     bool charged = false;
     uint16_t errorCode = 0;
+    // Transfer (uid: sender, credit unused)
+    char peerUid[CardUid::kHexBufferSize] = {0};
+    int32_t amount = 0;
     // RemoteOnline
     bool remoteReady = false;
     bool freeMode = false;
@@ -214,6 +218,11 @@ struct CloudResponse
     // ok=false: malformed request (error tells why), it is refused and deleted.
     char remoteId[kRemoteIdSize] = {0};
     uint64_t remoteTsMs = 0;
+    // RemoteVend with a recipient: a credit transfer user.uid -> transferTo instead of a purchase.
+    // Transfer response: user = the sender after the transfer (credit = its new credit).
+    bool transfer = false;
+    char transferTo[CardUid::kHexBufferSize] = {0};
+    int32_t transferAmount = 0;
 };
 
 class ICloud
