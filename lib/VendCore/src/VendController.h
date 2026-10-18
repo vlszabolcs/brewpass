@@ -53,17 +53,18 @@ struct VendTimings
 //                      └─ unknown / no credit / error ───────────────────────────────► ShowResult (error screen)
 //   Idle (free mode) ──inhibit LOW──► Pulsing ──► WaitVendAck ──► Vending ──► Idle
 //   Idle ──app request (RemoteVend)──► Authorizing ──► (same as a card)
-//   Idle ──app transfer request (RemoteVend with a recipient)──► Transferring ──► ShowResult
 //
 // A remote ("virtual card tap") request is only taken in Idle (or ShowResult, which it cuts short), in normal
 // mode, with inhibit LOW and if it is younger than remoteMaxAgeMs; otherwise it is refused with E33 without
 // touching the state. A card and a request in the same loop: the card wins. Progress is reported to the app
 // through RemoteStatus requests (accepted -> charged -> done | error).
 //
-// A transfer request moves credit from the sender's card to the recipient's card (no drink, no pulses, free mode
-// and inhibit do not matter). It is taken under the same conditions otherwise, and while it runs cards and other
-// requests are refused, so no purchase can overwrite the sender's credit in between. Reported as accepted -> done
-// (credit = the sender's new credit) | error.
+// A transfer request (RemoteVend with a recipient) moves credit from the sender's card to the recipient's card.
+// It runs in the background, beside the state machine: nothing is shown or played, and it is taken in any state
+// once the machine is ready (busy, free mode and inhibit do not matter). One transfer at a time; while a purchase
+// reads and writes a credit (Authorizing / Charging) it waits, so the purchase cannot overwrite it. A card read
+// after it reads the new credit (the cloud worker is FIFO). Reported as accepted -> done (credit = the sender's
+// new credit) | error.
 //
 // The order follows the original behaviour: the charge and the log happen BEFORE the credit pulses.
 // Differences from the original (stability): no pulses if the charge failed; every wait has a timeout.
@@ -79,7 +80,6 @@ public:
         Pulsing,
         WaitVendAck,
         Vending,
-        Transferring,
         ShowResult,
     };
 
@@ -125,10 +125,15 @@ private:
     void checkTimeouts(uint32_t nowMs);
 
     void onRemoteRequest(uint32_t nowMs, const CloudResponse &resp, bool cardPending);
-    void startTransfer(uint32_t nowMs, const CloudResponse &resp);
+    void queueTransfer(uint32_t nowMs, const CloudResponse &resp);
+    void startTransfer(uint32_t nowMs);
     void onTransferred(uint32_t nowMs, const CloudResponse &resp);
+    void finishTransfer(uint32_t nowMs, RemoteState st, ErrorCode code, int32_t credit = 0);
+    // a purchase is between reading and writing a credit: a transfer must not run in between
+    bool creditBusy() const { return state_ == State::Authorizing || state_ == State::Charging; }
     void rejectRemote(uint32_t nowMs, const char *reqId, ErrorCode code, const char *why);
-    void sendRemoteStatus(uint32_t nowMs, const char *reqId, RemoteState st, bool deleteRequest, ErrorCode code = ErrorCode::None);
+    void sendRemoteStatus(uint32_t nowMs, const char *reqId, RemoteState st, bool deleteRequest, ErrorCode code = ErrorCode::None,
+                          const int32_t *credit = nullptr);
     void finishRemote(uint32_t nowMs, RemoteState st, ErrorCode code = ErrorCode::None);
     bool remoteReady() const;
     void updateRemotePresence(uint32_t nowMs);
@@ -200,7 +205,18 @@ private:
     // remote purchase
     bool remote_ = false; // the current transaction came from the app
     char remoteId_[kRemoteIdSize] = {0};
-    int32_t transferAmount_ = 0;
+    // background credit transfer: waiting (queued) or sent to the cloud (reqId != 0)
+    struct Transfer
+    {
+        bool queued = false;
+        uint32_t reqId = 0;
+        uint32_t deadlineMs = 0;
+        char from[CardUid::kHexBufferSize] = {0};
+        char to[CardUid::kHexBufferSize] = {0};
+        int32_t amount = 0;
+        char remoteId[kRemoteIdSize] = {0};
+        bool busy() const { return queued || reqId != 0; }
+    } transfer_;
     RemoteMark remoteMark_;
     bool remoteMarkChanged_ = false;
     bool presenceAttempted_ = false;

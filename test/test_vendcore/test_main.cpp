@@ -861,6 +861,8 @@ void test_transfer_happy_path()
 {
     Rig r;
     r.start();
+    const size_t screens = r.ui.screens.size();
+    const size_t sounds = r.fb.played.size();
     pushTransfer(r, "-Nxfer", "11223344", 200);
     r.step();
     const CloudRequest *t = r.cloud.lastOf(CloudOp::Transfer);
@@ -870,10 +872,11 @@ void test_transfer_happy_path()
     TEST_ASSERT_EQUAL_INT32(200, t->amount);
     TEST_ASSERT_EQUAL(0, r.cloud.count(CloudOp::FetchUser));
     r.step();
-    TEST_ASSERT_EQUAL(S::ShowResult, r.state());
+    // in the background: no state change, nothing shown or played
+    TEST_ASSERT_EQUAL(S::Idle, r.state());
+    TEST_ASSERT_EQUAL(screens, r.ui.screens.size());
+    TEST_ASSERT_EQUAL(sounds, r.fb.played.size());
     TEST_ASSERT_EQUAL(0, r.coin.pulseTrains); // no drink
-    TEST_ASSERT_EQUAL_STRING("Átutalva: 200 Ft", r.ui.last().text);
-    TEST_ASSERT_EQUAL_INT32(300, r.ui.last().amount);
 
     auto st = remoteStatuses(r, "-Nxfer");
     TEST_ASSERT_EQUAL(2, (int)st.size());
@@ -882,12 +885,18 @@ void test_transfer_happy_path()
     TEST_ASSERT_EQUAL(RemoteState::Done, st[1].remoteState);
     TEST_ASSERT_TRUE(st[1].charged);
     TEST_ASSERT_EQUAL_INT32(300, st[1].credit);
+
+    // a card right after it is a normal purchase
+    r.tap();
+    r.step();
+    TEST_ASSERT_EQUAL(1, r.cloud.count(CloudOp::FetchUser));
 }
 
 void test_transfer_low_credit_and_unknown_card()
 {
     Rig r;
     r.start();
+    const size_t screens = r.ui.screens.size();
     r.cloud.userCredit = 100;
     pushTransfer(r, "-Nlow", "11223344", 200);
     r.step(2);
@@ -895,6 +904,8 @@ void test_transfer_low_credit_and_unknown_card()
     TEST_ASSERT_EQUAL(RemoteState::Error, st.back().remoteState);
     TEST_ASSERT_EQUAL(31, st.back().errorCode);
     TEST_ASSERT_FALSE(st.back().charged);
+    TEST_ASSERT_EQUAL(S::Idle, r.state());
+    TEST_ASSERT_EQUAL(screens, r.ui.screens.size()); // errors only go to the app
 
     Rig r2;
     r2.start();
@@ -926,25 +937,89 @@ void test_transfer_invalid_request_refused()
     TEST_ASSERT_EQUAL(S::Idle, r.state());
 }
 
-void test_transfer_blocks_cards_and_requests()
+void test_transfer_runs_while_vending()
+{
+    Rig r;
+    r.start();
+    r.tap();
+    r.step(3);
+    TEST_ASSERT_TRUE(r.state() == S::Pulsing || r.state() == S::WaitVendAck || r.state() == S::Vending);
+    pushTransfer(r, "-Nbusy", "11223344", 100);
+    r.step();
+    TEST_ASSERT_TRUE(r.state() == S::Pulsing || r.state() == S::WaitVendAck || r.state() == S::Vending);
+    TEST_ASSERT_EQUAL(1, r.cloud.count(CloudOp::Transfer));
+    TEST_ASSERT_EQUAL(RemoteState::Done, remoteStatuses(r, "-Nbusy").back().remoteState);
+}
+
+void test_transfer_waits_for_running_purchase()
+{
+    Rig r;
+    r.start();
+    r.cloud.autoRespond = false;
+    r.tap();
+    r.step();
+    TEST_ASSERT_EQUAL(S::Authorizing, r.state());
+    pushTransfer(r, "-Nwait", "11223344", 200);
+    r.step();
+    TEST_ASSERT_EQUAL(0, r.cloud.count(CloudOp::Transfer)); // the purchase reads and writes the credit now
+    TEST_ASSERT_EQUAL(RemoteState::Accepted, remoteStatuses(r, "-Nwait")[0].remoteState);
+    TEST_ASSERT_EQUAL(S::Authorizing, r.state());
+
+    // a second transfer meanwhile is refused
+    pushTransfer(r, "-Nwait2", "11223344", 100);
+    r.step();
+    TEST_ASSERT_EQUAL(33, remoteStatuses(r, "-Nwait2")[0].errorCode);
+
+    r.cloud.autoRespond = true;
+    CloudResponse fetched;
+    fetched.id = r.cloud.lastOf(CloudOp::FetchUser)->id;
+    fetched.op = CloudOp::FetchUser;
+    fetched.ok = true;
+    snprintf(fetched.user.uid, sizeof(fetched.user.uid), "%s", r.cloud.lastOf(CloudOp::FetchUser)->uid);
+    fetched.user.credit = 500;
+    r.cloud.responses.push_back(fetched);
+    r.step(3);
+    // after the credit was written
+    size_t update = 0, transfer = 0;
+    for (size_t i = 0; i < r.cloud.requests.size(); i++)
+    {
+        if (r.cloud.requests[i].op == CloudOp::UpdateUser)
+            update = i;
+        if (r.cloud.requests[i].op == CloudOp::Transfer)
+            transfer = i;
+    }
+    TEST_ASSERT_TRUE(update > 0);
+    TEST_ASSERT_TRUE(transfer > update);
+    TEST_ASSERT_EQUAL(RemoteState::Done, remoteStatuses(r, "-Nwait").back().remoteState);
+}
+
+void test_transfer_timeout_reported_to_app_only()
 {
     Rig r;
     r.start();
     r.cloud.autoRespond = false;
     pushTransfer(r, "-Nslow", "11223344", 200);
     r.step();
-    TEST_ASSERT_EQUAL(S::Transferring, r.state());
-    r.tap();
+    TEST_ASSERT_EQUAL(1, r.cloud.count(CloudOp::Transfer));
+    r.tap(); // cards still work meanwhile
     r.step();
-    pushRemote(r, "-Nzbuy");
+    TEST_ASSERT_EQUAL(S::Authorizing, r.state());
+    r.clock.now += r.timings.updateUserTimeoutMs + 1;
     r.step();
-    TEST_ASSERT_EQUAL(0, r.cloud.count(CloudOp::FetchUser)); // the sender's credit cannot change in between
-    TEST_ASSERT_EQUAL(33, remoteStatuses(r, "-Nzbuy")[0].errorCode);
-    TEST_ASSERT_EQUAL(S::Transferring, r.state());
-
-    r.step(1, r.timings.updateUserTimeoutMs);
-    TEST_ASSERT_EQUAL(S::ShowResult, r.state());
     TEST_ASSERT_EQUAL(23, remoteStatuses(r, "-Nslow").back().errorCode);
+    TEST_ASSERT_EQUAL(ErrorCode::CloudTimeout, r.ui.last().error.code); // that is the card's own fetch timeout
+}
+
+void test_transfer_refused_when_not_ready()
+{
+    Rig r;
+    r.start();
+    r.net.up = false;
+    r.step();
+    pushTransfer(r, "-Noff", "11223344", 100);
+    r.step();
+    TEST_ASSERT_EQUAL(0, r.cloud.count(CloudOp::Transfer));
+    TEST_ASSERT_EQUAL(33, remoteStatuses(r, "-Noff").back().errorCode);
 }
 
 void test_transfer_works_in_free_mode_and_with_inhibit()
@@ -1030,7 +1105,10 @@ int main(int, char **)
     RUN_TEST(test_transfer_happy_path);
     RUN_TEST(test_transfer_low_credit_and_unknown_card);
     RUN_TEST(test_transfer_invalid_request_refused);
-    RUN_TEST(test_transfer_blocks_cards_and_requests);
+    RUN_TEST(test_transfer_runs_while_vending);
+    RUN_TEST(test_transfer_waits_for_running_purchase);
+    RUN_TEST(test_transfer_timeout_reported_to_app_only);
+    RUN_TEST(test_transfer_refused_when_not_ready);
     RUN_TEST(test_transfer_works_in_free_mode_and_with_inhibit);
     return UNITY_END();
 }

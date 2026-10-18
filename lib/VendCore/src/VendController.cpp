@@ -49,7 +49,6 @@ const char *VendController::stateName(State s)
     case State::Pulsing: return "Pulsing";
     case State::WaitVendAck: return "WaitVendAck";
     case State::Vending: return "Vending";
-    case State::Transferring: return "Transferring";
     case State::ShowResult: return "ShowResult";
     }
     return "?";
@@ -126,6 +125,8 @@ void VendController::loop()
     applyPendingConfig();
     scheduleConfigRefresh(now);
     checkTimeouts(now);
+    if (transfer_.queued && !creditBusy())
+        startTransfer(now);
 
     switch (state_)
     {
@@ -137,7 +138,6 @@ void VendController::loop()
         break;
     case State::Authorizing:
     case State::Charging:
-    case State::Transferring:
         // waiting for the cloud response (processCloudResponses / checkTimeouts)
         break;
     case State::Pulsing:
@@ -285,7 +285,7 @@ bool VendController::submit(CloudRequest &req, uint32_t nowMs)
                                          static_cast<unsigned>(req.op)));
         return false;
     }
-    if (req.op == CloudOp::FetchUser || req.op == CloudOp::UpdateUser || req.op == CloudOp::Transfer)
+    if (req.op == CloudOp::FetchUser || req.op == CloudOp::UpdateUser)
         pendingId_ = req.id;
     return true;
 }
@@ -382,15 +382,21 @@ void VendController::processCloudResponses(uint32_t nowMs, bool cardPending)
         if (resp.op == CloudOp::WriteLog || resp.op == CloudOp::DeviceEvent || resp.op == CloudOp::RemoteStatus ||
             resp.op == CloudOp::RemoteOnline)
             continue; // the worker logs the result itself
+        if (resp.op == CloudOp::Transfer)
+        {
+            if (transfer_.reqId != 0 && resp.id == transfer_.reqId)
+                onTransferred(nowMs, resp);
+            else if (resp.ok)
+                logEvent(nowMs, "error", "LATE transfer %s -> %s %ld Ft done after the app was told it timed out",
+                         resp.user.uid, resp.transferTo, (long)resp.transferAmount);
+            continue;
+        }
 
         if (resp.id != pendingId_ || pendingId_ == 0)
         {
             if (resp.op == CloudOp::UpdateUser && resp.ok)
                 LOGE(TAG, "LATE response: credit of %s updated (%ld Ft), but the transaction already timed out - credit was NOT sent!",
                      resp.user.uid, (long)resp.user.credit);
-            else if (resp.op == CloudOp::Transfer && resp.ok)
-                logEvent(nowMs, "error", "LATE transfer %s -> %s %ld Ft done after the app was told it timed out",
-                         resp.user.uid, resp.transferTo, (long)resp.transferAmount);
             else
                 LOGW(TAG, "Stale cloud response ignored (id=%lu, op=%u)", (unsigned long)resp.id,
                      static_cast<unsigned>(resp.op));
@@ -402,8 +408,6 @@ void VendController::processCloudResponses(uint32_t nowMs, bool cardPending)
             onUserFetched(nowMs, resp);
         else if (state_ == State::Charging && resp.op == CloudOp::UpdateUser)
             onUserUpdated(nowMs, resp);
-        else if (state_ == State::Transferring && resp.op == CloudOp::Transfer)
-            onTransferred(nowMs, resp);
         else
             LOGW(TAG, "Unexpected response (op=%u) in state: %s", static_cast<unsigned>(resp.op), stateName(state_));
     }
@@ -606,12 +610,12 @@ void VendController::checkTimeouts(uint32_t nowMs)
                                          "Update credit (%s): no response. Charge uncertain, credit was not sent",
                                          user_.uid));
     }
-    else if (state_ == State::Transferring && reached(nowMs, deadlineMs_))
+
+    if (transfer_.reqId != 0 && reached(nowMs, transfer_.deadlineMs))
     {
-        pendingId_ = 0;
-        LOGE(TAG, "Transfer timed out (%s) - it may still have happened!", user_.uid);
-        showError(nowMs, ErrorInfo::make(ErrorCode::CloudTimeout, 0, "Transfer (%s, %ld Ft): no response, result uncertain",
-                                         user_.uid, (long)transferAmount_));
+        logEvent(nowMs, "error", "Transfer %s -> %s %ld Ft: no response, result uncertain", transfer_.from, transfer_.to,
+                 (long)transfer_.amount);
+        finishTransfer(nowMs, RemoteState::Error, ErrorCode::CloudTimeout);
     }
 }
 
@@ -646,6 +650,8 @@ void VendController::onRemoteRequest(uint32_t nowMs, const CloudResponse &resp, 
         return rejectRemote(nowMs, id, ErrorCode::RemoteRejected, "expired");
     if (ageMs < -static_cast<int64_t>(timings_.remoteMaxClockSkewMs))
         return rejectRemote(nowMs, id, ErrorCode::RemoteRejected, "timestamp in the future (clock?)");
+    if (resp.transfer)
+        return queueTransfer(nowMs, resp);
     if (cardPending)
         return rejectRemote(nowMs, id, ErrorCode::RemoteRejected, "a card was tapped at the machine");
 
@@ -654,8 +660,6 @@ void VendController::onRemoteRequest(uint32_t nowMs, const CloudResponse &resp, 
         setState(State::Idle, nowMs); // the result screen of the previous purchase is cut short
     if (state_ != State::Idle || !ready)
         return rejectRemote(nowMs, id, ErrorCode::RemoteRejected, stateName(state_));
-    if (resp.transfer)
-        return startTransfer(nowMs, resp);
     if (config_.freeMode)
         return rejectRemote(nowMs, id, ErrorCode::RemoteRejected, "free mode");
     if (!coin_.acceptingCredit())
@@ -680,63 +684,74 @@ void VendController::onRemoteRequest(uint32_t nowMs, const CloudResponse &resp, 
     setState(State::Authorizing, nowMs);
 }
 
-void VendController::startTransfer(uint32_t nowMs, const CloudResponse &resp)
+void VendController::queueTransfer(uint32_t nowMs, const CloudResponse &resp)
 {
     const char *id = resp.remoteId;
     if (!PurchasePolicy::validTransferAmount(resp.transferAmount) || strcmp(resp.user.uid, resp.transferTo) == 0)
         return rejectRemote(nowMs, id, ErrorCode::CloudData, "invalid transfer (amount or recipient)");
+    if (readinessError().isError())
+        return rejectRemote(nowMs, id, ErrorCode::RemoteRejected, stateName(state_));
+    if (transfer_.busy())
+        return rejectRemote(nowMs, id, ErrorCode::RemoteRejected, "another transfer is running");
 
-    user_ = UserRecord();
-    copyStr(user_.uid, sizeof(user_.uid), resp.user.uid);
-    remote_ = true;
-    charged_ = false;
-    transferAmount_ = resp.transferAmount;
-    copyStr(remoteId_, sizeof(remoteId_), id);
+    transfer_ = Transfer();
+    transfer_.queued = true;
+    copyStr(transfer_.from, sizeof(transfer_.from), resp.user.uid);
+    copyStr(transfer_.to, sizeof(transfer_.to), resp.transferTo);
+    transfer_.amount = resp.transferAmount;
+    copyStr(transfer_.remoteId, sizeof(transfer_.remoteId), id);
     sendRemoteStatus(nowMs, id, RemoteState::Accepted, true);
-    LOGI(TAG, "Transfer %s -> %s: %ld Ft", resp.user.uid, resp.transferTo, (long)resp.transferAmount);
+    LOGI(TAG, "Transfer %s -> %s: %ld Ft%s", transfer_.from, transfer_.to, (long)transfer_.amount,
+         creditBusy() ? " (waits for the running purchase)" : "");
+    if (!creditBusy())
+        startTransfer(nowMs);
+}
 
+void VendController::startTransfer(uint32_t nowMs)
+{
+    transfer_.queued = false;
     CloudRequest req;
     req.op = CloudOp::Transfer;
-    copyStr(req.uid, sizeof(req.uid), resp.user.uid);
-    copyStr(req.peerUid, sizeof(req.peerUid), resp.transferTo);
-    req.amount = resp.transferAmount;
+    req.id = nextRequestId_++;
+    if (nextRequestId_ == 0)
+        nextRequestId_ = 1;
+    req.deadlineMs = nowMs + timings_.requestTtlMs;
+    copyStr(req.uid, sizeof(req.uid), transfer_.from);
+    copyStr(req.peerUid, sizeof(req.peerUid), transfer_.to);
+    req.amount = transfer_.amount;
     req.timestamp = clock_.epoch();
-    if (!submit(req, nowMs))
-        return; // showError() already answered the app
-
-    Screen s;
-    s.kind = ScreenKind::Checking;
-    copyStr(s.title, sizeof(s.title), msg::kTransferTitle);
-    snprintf(s.text, sizeof(s.text), "%s: %ld %s", msg::kRemoteRequest, (long)transferAmount_, msg::kCurrency);
-    ui_.show(s);
-    deadlineMs_ = nowMs + timings_.updateUserTimeoutMs;
-    setState(State::Transferring, nowMs);
+    if (!cloud_.submit(req))
+    {
+        LOGE(TAG, "Transfer NOT queued (cloud queue full)");
+        return finishTransfer(nowMs, RemoteState::Error, ErrorCode::CloudRequest);
+    }
+    transfer_.reqId = req.id;
+    transfer_.deadlineMs = nowMs + timings_.updateUserTimeoutMs;
 }
 
 void VendController::onTransferred(uint32_t nowMs, const CloudResponse &resp)
 {
     if (!resp.ok)
     {
+        LOGW(TAG, "Transfer %s -> %s failed: E%u %s", transfer_.from, transfer_.to,
+             static_cast<unsigned>(resp.error.code), resp.error.detail);
         if (resp.notFound)
-            showError(nowMs, ErrorInfo::make(ErrorCode::CardUnknown, 0, "UID: %s", resp.user.uid));
-        else if (resp.error.code == ErrorCode::CreditLow)
-            showError(nowMs, resp.error);
-        else
-            showError(nowMs, ErrorInfo::make(ErrorCode::CreditUpdateFailed, resp.error.detailCode, "E%u: %s",
-                                             static_cast<unsigned>(resp.error.code), resp.error.detail));
-        return;
+            return finishTransfer(nowMs, RemoteState::Error, ErrorCode::CardUnknown);
+        if (resp.error.code == ErrorCode::CreditLow)
+            return finishTransfer(nowMs, RemoteState::Error, ErrorCode::CreditLow);
+        logEvent(nowMs, "error", "Transfer %s -> %s %ld Ft failed: E%u %s", transfer_.from, transfer_.to,
+                 (long)transfer_.amount, static_cast<unsigned>(resp.error.code), resp.error.detail);
+        return finishTransfer(nowMs, RemoteState::Error, ErrorCode::CreditUpdateFailed);
     }
+    LOGI(TAG, "Transferred %ld Ft: %s -> %s, sender credit: %ld Ft", (long)transfer_.amount, transfer_.from,
+         transfer_.to, (long)resp.user.credit);
+    finishTransfer(nowMs, RemoteState::Done, ErrorCode::None, resp.user.credit);
+}
 
-    user_ = resp.user;
-    charged_ = true;
-    LOGI(TAG, "Transferred %ld Ft: %s -> %s, sender credit: %ld Ft", (long)transferAmount_, user_.uid, resp.transferTo,
-         (long)user_.credit);
-    feedback_.play(FeedbackPattern::Success);
-    char text[48];
-    snprintf(text, sizeof(text), "%s: %ld %s", msg::kTransferDone, (long)transferAmount_, msg::kCurrency);
-    showSuccess(text);
-    finishRemote(nowMs, RemoteState::Done);
-    showResultFor(nowMs, timings_.successScreenMs);
+void VendController::finishTransfer(uint32_t nowMs, RemoteState st, ErrorCode code, int32_t credit)
+{
+    sendRemoteStatus(nowMs, transfer_.remoteId, st, false, code, st == RemoteState::Done ? &credit : nullptr);
+    transfer_ = Transfer();
 }
 
 void VendController::rejectRemote(uint32_t nowMs, const char *reqId, ErrorCode code, const char *why)
@@ -745,7 +760,8 @@ void VendController::rejectRemote(uint32_t nowMs, const char *reqId, ErrorCode c
     sendRemoteStatus(nowMs, reqId, RemoteState::Error, true, code);
 }
 
-void VendController::sendRemoteStatus(uint32_t nowMs, const char *reqId, RemoteState st, bool deleteRequest, ErrorCode code)
+void VendController::sendRemoteStatus(uint32_t nowMs, const char *reqId, RemoteState st, bool deleteRequest, ErrorCode code,
+                                      const int32_t *credit)
 {
     CloudRequest req;
     req.op = CloudOp::RemoteStatus;
@@ -758,8 +774,9 @@ void VendController::sendRemoteStatus(uint32_t nowMs, const char *reqId, RemoteS
     req.deleteRemoteRequest = deleteRequest;
     req.errorCode = static_cast<uint16_t>(code);
     // the remaining credit is only reported once the account was charged in this transaction
-    req.charged = remote_ && strcmp(reqId, remoteId_) == 0 && charged_;
-    req.credit = req.charged ? user_.credit : 0;
+    // (a transfer passes it explicitly)
+    req.charged = credit != nullptr || (remote_ && strcmp(reqId, remoteId_) == 0 && charged_);
+    req.credit = credit ? *credit : req.charged ? user_.credit : 0;
     if (!cloud_.submit(req))
         LOGE(TAG, "App status NOT queued: %s %s", reqId, remoteStateName(st));
 }
@@ -977,7 +994,7 @@ void VendController::showError(uint32_t nowMs, const ErrorInfo &e)
     const bool important = e.code == ErrorCode::CreditUpdateFailed || e.code == ErrorCode::VendNotAcknowledged ||
                            e.code == ErrorCode::MachineStuck || e.code == ErrorCode::ChargedNotVended ||
                            (e.code == ErrorCode::CloudTimeout &&
-                            (state_ == State::Charging || state_ == State::Transferring));
+                            state_ == State::Charging);
     if (important)
         logEvent(nowMs, "error", "E%u %s: %s", static_cast<unsigned>(e.code), errorCodeName(e.code), e.detail);
     if (remote_)

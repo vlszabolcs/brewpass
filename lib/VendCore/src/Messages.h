@@ -21,8 +21,6 @@ namespace msg
     constexpr const char *kFreeVend = "Kredit átadva (ingyenes)";
     constexpr const char *kRemoteRequest = "Appból";
     constexpr const char *kRemoteVendInProgress = "Appból - válassz italt";
-    constexpr const char *kTransferTitle = "Átutalás";
-    constexpr const char *kTransferDone = "Átutalva";
     constexpr const char *kErrorPrefix = "HIBA";
 
     constexpr const char *kPriceLabel = "Ár:";
