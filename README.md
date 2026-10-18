@@ -173,6 +173,29 @@ is run at most once (the last handled `ts` + push key is saved in NVS, so a re-d
 restart or a reboot is only deleted), and a refused request does not disturb the display. Status entries are not
 deleted by the machine (a few dozen bytes per purchase).
 
+### 4. Credit transfer between two cards
+
+The same request with two more fields moves credit from the sender's card to another card:
+
+```kotlin
+ref.setValue(mapOf("cardUid" to from, "ts" to ServerValue.TIMESTAMP, "to" to "11223344", "amount" to 500))
+```
+
+- `amount`: whole hundreds, 100 to 100 000 Ft. The sender's credit may not go negative (E31), unlike a purchase.
+- The machine reads both credits and writes both cards in ONE PATCH on the database root:
+  `users/<from>`: `credit`, `log/<k>` = new credit, `xfer/<k>` = `{"amount": -500, "peer": "<recipient's name>"}`,
+  and the same for `users/<to>` with `+500`. `xfer/<k>` marks the log entry with the same key as a transfer
+  (the apps show it as such instead of a purchase or a top-up).
+- It runs in the background: nothing is shown on the display and no sound is played, the result only goes to the
+  app. It is taken in any state once the machine is ready (also while a drink is being made, in free mode or with
+  inhibit). While a purchase is between reading and writing a credit (checking / charging) it waits for that, so
+  the purchase cannot overwrite it; a card tapped after it reads the new credit. One transfer at a time.
+- Status: `accepted` → `done` (`credit` = the sender's new credit) | `error`. Codes: 24 bad amount / same card,
+  30 unknown card (either side), 31 not enough credit, 25 the write failed (nothing moved), 23 no answer (uncertain,
+  see `/Log`), 33 refused (machine not ready, or another transfer is running).
+- `online.transfer = true` tells the app that the firmware handles transfers. An older firmware would run the
+  request as a purchase on the sender's card, so the app must not send a transfer without it.
+
 **Memory:** the request stream is a third TLS connection (~40 KB). It is only started if at least
 `kRemoteStreamMinFreeHeap` (70 KB) heap is free; otherwise `/Log` gets a `remote` event and `online.ready` stays
 false. The free heap is printed on the serial console every minute (`[APP] State: ... | heap: ...`).
