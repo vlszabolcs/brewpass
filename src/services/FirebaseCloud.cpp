@@ -288,7 +288,12 @@ void FirebaseCloud::run()
             if (!forcedReconnect_)
                 lastCallOkMs_ = millis();
             if (nowReady)
+            {
                 forcedReconnect_ = false;
+                // config: fetched right after the connection by the controller; app requests: right away
+                nextConfPollMs_ = millis() + settings::kConfigPollMs;
+                nextRemotePollMs_ = millis();
+            }
             stuck_.store(false);
         }
 
@@ -297,6 +302,8 @@ void FirebaseCloud::run()
             CloudRequest req;
             if (xQueueReceive(requests_, &req, pdMS_TO_TICKS(20)) == pdTRUE)
                 process(req);
+            else if (!settings::kUseStreams)
+                pollIfDue();
         }
         else
         {
@@ -466,6 +473,14 @@ bool FirebaseCloud::writeDeviceEvent(const CloudRequest &req, ErrorInfo &err)
 
 void FirebaseCloud::maintainStreams(bool online, bool ready)
 {
+    if (!settings::kUseStreams)
+    {
+        const uint32_t now = millis();
+        liveUpdates_.store(ready && lastConfPollOkMs_ != 0 && now - lastConfPollOkMs_ <= 3 * settings::kConfigPollMs);
+        remoteLive_.store(settings::kRemoteVendEnabled && ready && lastRemotePollOkMs_ != 0 &&
+                          now - lastRemotePollOkMs_ <= 5 * settings::kRemotePollMs);
+        return;
+    }
     // fresh streams after a reconnect (the old TLS connections are dead)
     const bool reconnected = online && !wasOnline_;
     wasOnline_ = online;
@@ -661,6 +676,41 @@ void FirebaseCloud::onStreamEvent(const String &event, const String &path, const
          resp.hasPrice ? (String("price=") + resp.config.price + " ").c_str() : "",
          resp.hasFree ? "free=" : "", resp.hasFree ? (resp.config.freeMode ? "true" : "false") : "");
     respond(resp);
+}
+
+// Polling instead of the streams (plain ESP32 without PSRAM: only ONE TLS connection fits next to everything else,
+// like the original firmware). Runs only when no request is waiting; the results go through the stream handlers.
+void FirebaseCloud::pollIfDue()
+{
+    const uint32_t now = millis();
+    if (settings::kRemoteVendEnabled && static_cast<int32_t>(now - nextRemotePollMs_) >= 0)
+    {
+        nextRemotePollMs_ = now + settings::kRemotePollMs;
+        const String path = remoteBasePath() + "/req";
+        const String data = db.get<String>(aClient, path);
+        ErrorInfo err;
+        if (lastCallOk("Poll app requests", path.c_str(), err))
+        {
+            lastRemotePollOkMs_ = millis();
+            onRemoteStreamEvent("put", "/", data); // "null": nothing pending
+        }
+        return; // one request per round, so a queued purchase waits as little as possible
+    }
+    if (static_cast<int32_t>(now - nextConfPollMs_) >= 0)
+    {
+        nextConfPollMs_ = now + settings::kConfigPollMs;
+        const String path = streamPath();
+        const String data = db.get<String>(aClient, path);
+        ErrorInfo err;
+        if (!lastCallOk("Poll config", path.c_str(), err))
+            return;
+        lastConfPollOkMs_ = millis();
+        if (data != lastConfPolled_)
+        {
+            lastConfPolled_ = data;
+            onStreamEvent("put", "/", data); // only a change is forwarded (like a stream event)
+        }
+    }
 }
 
 // ------------------------------------------------------------------ app purchase requests (remote/<dev>/req)

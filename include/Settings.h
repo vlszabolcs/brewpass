@@ -32,7 +32,7 @@
 namespace settings
 {
     constexpr const char *kFirmwareName = "BrewPass";
-    constexpr const char *kFirmwareVersion = "2.1.3";
+    constexpr const char *kFirmwareVersion = "2.2.0";
     constexpr const char *kHostname = "brewpass"; // mDNS: brewpass.local (OTA)
     // NVS namespace - kept from the old project name (rfidValidator), so the saved price/mode survives the rename
     constexpr const char *kNvsNamespace = "rfidval";
@@ -84,6 +84,16 @@ namespace settings
     // The request stream is a third TLS connection (~40 KB heap): it is only started if at least this much
     // heap is free, so the card purchases never run out of memory because of it.
     constexpr bool kRemoteVendEnabled = true;
+    // Target (plain ESP32, no PSRAM): the config and the app requests are POLLED over the single request
+    // connection instead of two extra always-open TLS streams (~40 KB heap each) - the three connections
+    // left too little memory, and the requests failed (E23) until a reset. The T-Embed has PSRAM: streams.
+#if defined(BOARD_TARGET)
+    constexpr bool kUseStreams = false;
+#else
+    constexpr bool kUseStreams = true;
+#endif
+    constexpr uint32_t kConfigPollMs = 30000;
+    constexpr uint32_t kRemotePollMs = 3000;
     constexpr uint32_t kRemoteStreamMinFreeHeap = 70000;
     constexpr uint32_t kRemoteStreamHeapRetryMs = 60000;
 

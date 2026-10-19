@@ -63,6 +63,7 @@ private:
     void stopStream(Stream &s, const char *reason);
     bool streamLive(const Stream &s) const;
     bool remoteHeapOk();
+    void pollIfDue();
     void respondRemote(const String &id, const String &json);
 
     void fetchUser(const CloudRequest &req, CloudResponse &resp);
@@ -99,6 +100,13 @@ private:
     std::atomic<bool> remoteLive_{false};
     bool remoteHeapWarned_ = false;
     uint32_t remotePausedUntilMs_ = 0;
+
+    // polling mode (settings::kUseStreams == false)
+    uint32_t nextConfPollMs_ = 0;
+    uint32_t nextRemotePollMs_ = 0;
+    uint32_t lastConfPollOkMs_ = 0;
+    uint32_t lastRemotePollOkMs_ = 0;
+    String lastConfPolled_;
 
     // request failures in a row (see trackCallResult)
     uint8_t failStreak_ = 0;
