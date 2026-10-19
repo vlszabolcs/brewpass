@@ -32,6 +32,8 @@ public:
     ErrorInfo statusError() const override;
     bool liveUpdates() const override { return liveUpdates_.load(); }
     bool remoteLive() const override { return remoteLive_.load(); }
+    // true when the requests keep failing although WiFi is up and the recovery did not help (-> restart)
+    bool stuck() const { return stuck_.load(); }
 
     // from the auth / stream callbacks (in the network task)
     void onAuthEvent(int code, const char *message, bool isError);
@@ -74,6 +76,7 @@ private:
     bool writeRemoteOnline(const CloudRequest &req, ErrorInfo &err);
 
     bool lastCallOk(const char *op, const char *path, ErrorInfo &out);
+    void trackCallResult(bool ok, const ErrorInfo &err);
     void respond(const CloudResponse &resp);
     void setStatusError(const ErrorInfo &e);
 
@@ -95,6 +98,14 @@ private:
     std::atomic<bool> liveUpdates_{false};
     std::atomic<bool> remoteLive_{false};
     bool remoteHeapWarned_ = false;
+    uint32_t remotePausedUntilMs_ = 0;
+
+    // request failures in a row (see trackCallResult)
+    uint8_t failStreak_ = 0;
+    uint32_t lastCallOkMs_ = 0;
+    uint32_t failHeap_ = 0;
+    uint32_t failMaxBlock_ = 0;
+    std::atomic<bool> stuck_{false};
     uint32_t lastLogKey_ = 0;   // the latest users/<UID>/log key (strictly increasing)
     uint32_t lastEventKey_ = 0; // the latest /Log key
 

@@ -276,6 +276,10 @@ void FirebaseCloud::run()
                 LOGI(TAG, "Firebase ready");
             else
                 LOGW(TAG, "Firebase unavailable (WiFi: %s)", online ? "up" : "down");
+            // the stuck supervision only covers the "ready but every request fails" case
+            failStreak_ = 0;
+            lastCallOkMs_ = millis();
+            stuck_.store(false);
         }
 
         if (nowReady)
@@ -524,6 +528,11 @@ void FirebaseCloud::startStream(Stream &s)
 {
     if (&s == &remoteStream_)
     {
+        if (static_cast<int32_t>(millis() - remotePausedUntilMs_) < 0)
+        {
+            s.nextStartMs = remotePausedUntilMs_;
+            return;
+        }
         if (!remoteHeapOk())
         {
             s.nextStartMs = millis() + settings::kRemoteStreamHeapRetryMs;
@@ -788,7 +797,10 @@ bool FirebaseCloud::lastCallOk(const char *op, const char *path, ErrorInfo &out)
 {
     const int code = aClient.lastError().code();
     if (code == 0)
+    {
+        trackCallResult(true, out);
         return true;
+    }
 
     ErrorCode ec = ErrorCode::CloudRequest;
     if (code == FIREBASE_ERROR_TCP_RECEIVE_TIMEOUT || code == FIREBASE_ERROR_HTTP_CODE_REQUEST_TIMEOUT ||
@@ -800,7 +812,52 @@ bool FirebaseCloud::lastCallOk(const char *op, const char *path, ErrorInfo &out)
     const String message = aClient.lastError().message();
     out = ErrorInfo::make(ec, code, "%s (%s): %s [code %d]", op, path, message.c_str(), code);
     LOGE(TAG, "%s", out.detail);
+    trackCallResult(false, out);
     return false;
+}
+
+// A request connection that once got into a bad state (e.g. no memory left for a new TLS handshake next to the
+// two streams) used to fail every request until a reset. After a few failures in a row: reopen the connection
+// and pause the remote request stream to free its memory; if nothing succeeds for long, stuck() asks for a restart.
+void FirebaseCloud::trackCallResult(bool ok, const ErrorInfo &err)
+{
+    const uint32_t now = millis();
+    if (ok)
+    {
+        if (failStreak_ >= settings::kCloudFailStreakRecover)
+        {
+            CloudRequest ev = makeDeviceEvent(now + kEventTtlMs, 0, "cloud", "recovered after %u failed requests",
+                                              (unsigned)failStreak_);
+            xQueueSendToBack(requests_, &ev, 0);
+        }
+        failStreak_ = 0;
+        lastCallOkMs_ = now;
+        stuck_.store(false);
+        return;
+    }
+
+    if (failStreak_ < 255)
+        failStreak_++;
+    if (failStreak_ == settings::kCloudFailStreakRecover)
+    {
+        const unsigned freeHeap = ESP.getFreeHeap();
+        const unsigned maxBlock = ESP.getMaxAllocHeap();
+        LOGW(TAG, "%u failed requests in a row - reopening the connection (heap %u, largest block %u)", (unsigned)failStreak_,
+             freeHeap, maxBlock);
+        sslClient.stop();
+        if (settings::kRemoteVendEnabled)
+        {
+            if (remoteStream_.active)
+                stopStream(remoteStream_, "paused to free memory for the requests");
+            remotePausedUntilMs_ = now + settings::kRemoteStreamPauseMs;
+            remoteStream_.nextStartMs = remotePausedUntilMs_;
+        }
+        CloudRequest ev = makeDeviceEvent(now + kEventTtlMs, 0, "cloud", "%u failed requests, heap %u, largest block %u: %.60s",
+                                          (unsigned)failStreak_, freeHeap, maxBlock, err.detail);
+        xQueueSendToBack(requests_, &ev, 0);
+    }
+    if (failStreak_ >= settings::kCloudFailStreakRecover && now - lastCallOkMs_ >= settings::kCloudStuckRestartMs)
+        stuck_.store(true);
 }
 
 void FirebaseCloud::fetchUser(const CloudRequest &req, CloudResponse &resp)

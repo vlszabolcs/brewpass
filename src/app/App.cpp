@@ -15,6 +15,17 @@ namespace
     const WifiNetwork::Credential kNetworks[] = WIFI_NETWORKS;
     constexpr uint32_t kBootEventTtlMs = 30UL * 60UL * 1000UL; // also logged after an offline boot if the network is up within 30 min
 
+    // survives a software restart: marks the restart made by the stuck database connection recovery
+    constexpr uint32_t kCloudRestartMagic = 0xC10DB007;
+    RTC_NOINIT_ATTR uint32_t gCloudRestartMark;
+
+    bool consumeCloudRestartMark()
+    {
+        const bool set = esp_reset_reason() == ESP_RST_SW && gCloudRestartMark == kCloudRestartMagic;
+        gCloudRestartMark = 0;
+        return set;
+    }
+
     const char *resetReasonText(esp_reset_reason_t r)
     {
         switch (r)
@@ -58,9 +69,11 @@ void App::begin()
 
     // boot event to the device log (/Log); the background task writes it after WiFi + time sync
     const bool afterOta = OtaService::consumeUpdatedFlag();
-    const CloudRequest boot = makeDeviceEvent(millis() + kBootEventTtlMs, 0, "boot", "%s v%s, reason: %s%s", board::kShortName,
+    const bool afterCloudStuck = consumeCloudRestartMark();
+    const CloudRequest boot = makeDeviceEvent(millis() + kBootEventTtlMs, 0, "boot", "%s v%s, reason: %s%s%s", board::kShortName,
                                               settings::kFirmwareVersion, resetReasonText(esp_reset_reason()),
-                                              afterOta ? " (after OTA update)" : "");
+                                              afterOta ? " (after OTA update)" : "",
+                                              afterCloudStuck ? " (database requests kept failing)" : "");
     cloud_.submit(boot);
 
     controller_.begin(configStore_.load(), configStore_.loadRemoteMark());
@@ -85,6 +98,20 @@ void App::loop()
         configStore_.saveRemoteMark(controller_.remoteMark());
     hw_.ui.loop(now);
     reportHealth(now);
+    restartIfCloudStuck();
+}
+
+// Last resort for a database connection that does not recover by itself (a reset always fixed it)
+void App::restartIfCloudStuck()
+{
+    const VendController::State st = controller_.state();
+    if (!cloud_.stuck() || (st != VendController::State::Idle && st != VendController::State::NotReady))
+        return;
+    LOGE(TAG, "Database requests keep failing for %lu s - restarting",
+         (unsigned long)(settings::kCloudStuckRestartMs / 1000));
+    gCloudRestartMark = kCloudRestartMagic;
+    delay(100);
+    ESP.restart();
 }
 
 // true while an OTA update is running (purchases are paused meanwhile)

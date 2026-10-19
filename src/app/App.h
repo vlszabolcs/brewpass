@@ -22,6 +22,7 @@ private:
     void configureWatchdog();
     void printBanner();
     void reportHealth(uint32_t nowMs);
+    void restartIfCloudStuck();
     bool handleOta();
 
     Hardware &hw_;

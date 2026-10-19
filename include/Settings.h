@@ -32,7 +32,7 @@
 namespace settings
 {
     constexpr const char *kFirmwareName = "BrewPass";
-    constexpr const char *kFirmwareVersion = "2.1.0";
+    constexpr const char *kFirmwareVersion = "2.1.1";
     constexpr const char *kHostname = "brewpass"; // mDNS: brewpass.local (OTA)
     // NVS namespace - kept from the old project name (rfidValidator), so the saved price/mode survives the rename
     constexpr const char *kNvsNamespace = "rfidval";
@@ -62,6 +62,13 @@ namespace settings
     constexpr uint8_t kCloudRequestQueueLen = 16;
     constexpr uint8_t kCloudResponseQueueLen = 8;
     constexpr uint8_t kLogMaxAttempts = 3;
+    // Recovery from a stuck database connection (E22/E23 on every request while WiFi is up):
+    // after this many failed requests in a row the request connection is reopened and the remote request
+    // stream (the third TLS connection) is paused to free its memory ...
+    constexpr uint8_t kCloudFailStreakRecover = 3;
+    constexpr uint32_t kRemoteStreamPauseMs = 5UL * 60UL * 1000UL;
+    // ... and if no request has succeeded for this long, the device restarts (only in an idle state)
+    constexpr uint32_t kCloudStuckRestartMs = 5UL * 60UL * 1000UL;
 
     // Coffee machine interface (NRI G-13 emulation) - the original timing: 2 pulses, 50 ms LOW / 50 ms HIGH
     constexpr uint8_t kCoinPulseCount = 2;
