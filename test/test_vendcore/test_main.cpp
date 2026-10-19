@@ -1063,6 +1063,10 @@ void test_remote_presence_heartbeat()
     TEST_ASSERT_FALSE(lastPresence(r)->remoteReady);
 }
 
+// Unity 2.6 only declares these as weak defaults, which MinGW (Windows) cannot link
+void setUp() {}
+void tearDown() {}
+
 int main(int, char **)
 {
     UNITY_BEGIN();
