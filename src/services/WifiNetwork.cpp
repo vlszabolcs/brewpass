@@ -94,6 +94,13 @@ void WifiNetwork::maintain(uint32_t nowMs)
     }
 }
 
+void WifiNetwork::forceReconnect(const char *why)
+{
+    LOGW(TAG, "Forced reconnect: %s", why);
+    WiFi.disconnect(false, false);
+    lastAttemptMs_ = millis() - settings::kWifiRetryIntervalMs;
+}
+
 // Scans, then tries the configured networks in the given order; stops at the first success.
 // Networks that are not visible are skipped - unless none is visible (then all are tried, for hidden SSIDs).
 void WifiNetwork::connectInOrder()

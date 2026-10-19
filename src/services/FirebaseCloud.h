@@ -103,6 +103,7 @@ private:
     // request failures in a row (see trackCallResult)
     uint8_t failStreak_ = 0;
     uint32_t lastCallOkMs_ = 0;
+    bool forcedReconnect_ = false;
     uint32_t failHeap_ = 0;
     uint32_t failMaxBlock_ = 0;
     std::atomic<bool> stuck_{false};

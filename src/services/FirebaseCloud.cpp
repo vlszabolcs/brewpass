@@ -282,9 +282,13 @@ void FirebaseCloud::run()
                 LOGI(TAG, "Firebase ready");
             else
                 LOGW(TAG, "Firebase unavailable (WiFi: %s)", online ? "up" : "down");
-            // the stuck supervision only covers the "ready but every request fails" case
+            // the stuck supervision only covers the "ready but every request fails" case; our own forced
+            // reconnect does not restart its clock (so a reset still comes if reconnecting does not help)
             failStreak_ = 0;
-            lastCallOkMs_ = millis();
+            if (!forcedReconnect_)
+                lastCallOkMs_ = millis();
+            if (nowReady)
+                forcedReconnect_ = false;
             stuck_.store(false);
         }
 
@@ -851,6 +855,10 @@ void FirebaseCloud::trackCallResult(bool ok, const ErrorInfo &err)
         LOGW(TAG, "%u failed requests in a row - reopening the connection (heap %u, largest block %u)", (unsigned)failStreak_,
              freeHeap, maxBlock);
         sslClient.stop();
+        // seen on the target: WiFi stays "connected" but every new connection is aborted (errno 113) until a
+        // reset - a fresh association fixes it (the streams are restarted after the reconnect anyway)
+        wifi_.forceReconnect("database requests keep failing");
+        forcedReconnect_ = true;
         if (settings::kRemoteVendEnabled)
         {
             if (remoteStream_.active)

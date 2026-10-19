@@ -22,6 +22,8 @@ public:
 
     void begin();
     void maintain(uint32_t nowMs);
+    // drops the association; maintain() reconnects right away (for a link that is "up" but passes no traffic)
+    void forceReconnect(const char *why);
 
     bool connected() const override { return connected_.load(); }
     void ssid(char *out, size_t outSize) const override;
