@@ -1079,6 +1079,19 @@ void test_remote_presence_heartbeat()
     TEST_ASSERT_FALSE(lastPresence(r)->remoteReady);
 }
 
+void test_no_presence_write_during_card_check()
+{
+    Rig r;
+    r.start();
+    r.step(25, 100);
+    const int before = r.cloud.count(CloudOp::RemoteOnline);
+    r.cloud.autoRespond = false; // the user fetch is still running
+    r.tap();
+    r.step(40, 100); // well past the min gap of the availability change
+    TEST_ASSERT_EQUAL(S::Authorizing, r.state());
+    TEST_ASSERT_EQUAL(before, r.cloud.count(CloudOp::RemoteOnline));
+}
+
 // newer Unity versions require these hooks
 void setUp() {}
 void tearDown() {}
@@ -1094,6 +1107,7 @@ int main(int, char **)
     RUN_TEST(test_happy_path_purchase);
     RUN_TEST(test_unknown_card);
     RUN_TEST(test_card_uid_never_displayed);
+    RUN_TEST(test_no_presence_write_during_card_check);
     RUN_TEST(test_low_credit_no_write);
     RUN_TEST(test_machine_not_ready_rejects_card);
     RUN_TEST(test_update_failure_means_no_credit_pulse);

@@ -179,7 +179,11 @@ void FirebaseCloud::begin()
 
 bool FirebaseCloud::submit(const CloudRequest &request)
 {
-    return requests_ != nullptr && xQueueSend(requests_, &request, 0) == pdTRUE;
+    if (requests_ == nullptr)
+        return false;
+    // a card purchase / transfer must not wait behind log and heartbeat writes (its TTL is only a few seconds)
+    const bool urgent = request.op == CloudOp::FetchUser || request.op == CloudOp::UpdateUser || request.op == CloudOp::Transfer;
+    return (urgent ? xQueueSendToFront(requests_, &request, 0) : xQueueSendToBack(requests_, &request, 0)) == pdTRUE;
 }
 
 bool FirebaseCloud::poll(CloudResponse &response)
@@ -226,6 +230,8 @@ void FirebaseCloud::startApp()
 {
     sslClient.setInsecure(); // the Firebase certificate chain may change; authentication is provided by the token
     sslClient.setHandshakeTimeout(settings::kFirebaseHandshakeTimeoutS);
+    // socket timeout of a TLS write / read (default 30 s): a dead connection used to block the task for 30 s
+    sslClient.setTimeout(settings::kFirebaseSyncTimeoutS);
     aClient.setSyncSendTimeout(settings::kFirebaseSyncTimeoutS);
     aClient.setSyncReadTimeout(settings::kFirebaseSyncTimeoutS);
 

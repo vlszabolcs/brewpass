@@ -821,6 +821,10 @@ void VendController::updateRemotePresence(uint32_t nowMs)
 {
     if (!cloud_.ready())
         return;
+    // Never while a card is checked / charged: the network task handles one request at a time, and a slow
+    // heartbeat write in front of the credit update used to make the purchase time out (E23)
+    if (state_ == State::Authorizing || state_ == State::Charging)
+        return;
     const bool ready = remoteReady();
     const bool due = !presenceAttempted_ || reached(nowMs, lastPresenceMs_ + timings_.remoteHeartbeatMs) ||
                      (ready != presenceReady_ && reached(nowMs, lastPresenceMs_ + timings_.remoteHeartbeatMinGapMs));
