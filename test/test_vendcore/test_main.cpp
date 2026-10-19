@@ -337,6 +337,22 @@ void test_unknown_card()
     TEST_ASSERT_EQUAL(0, r.coin.pulseTrains);
 }
 
+void test_card_uid_never_displayed()
+{
+    Rig r;
+    r.start();
+    r.cloud.userExists = false; // the unknown card error used to show "UID: ..."
+    r.tap();
+    r.step(2);
+    TEST_ASSERT_EQUAL(ErrorCode::CardUnknown, r.ui.last().error.code);
+    for (const Screen &s : r.ui.screens)
+    {
+        TEST_ASSERT_NULL(strstr(s.title, "04A1B2C3"));
+        TEST_ASSERT_NULL(strstr(s.text, "04A1B2C3"));
+        TEST_ASSERT_NULL(strstr(s.error.detail, "04A1B2C3"));
+    }
+}
+
 void test_low_credit_no_write()
 {
     Rig r;
@@ -1063,6 +1079,10 @@ void test_remote_presence_heartbeat()
     TEST_ASSERT_FALSE(lastPresence(r)->remoteReady);
 }
 
+// newer Unity versions require these hooks
+void setUp() {}
+void tearDown() {}
+
 int main(int, char **)
 {
     UNITY_BEGIN();
@@ -1073,6 +1093,7 @@ int main(int, char **)
     RUN_TEST(test_not_ready_without_wifi);
     RUN_TEST(test_happy_path_purchase);
     RUN_TEST(test_unknown_card);
+    RUN_TEST(test_card_uid_never_displayed);
     RUN_TEST(test_low_credit_no_write);
     RUN_TEST(test_machine_not_ready_rejects_card);
     RUN_TEST(test_update_failure_means_no_credit_pulse);

@@ -25,6 +25,31 @@ namespace
         snprintf(dst, dstSize, "%s", src != nullptr ? src : "");
     }
 
+    // the card UID must not be displayed: every occurrence in an on-screen error detail becomes "***"
+    void maskUid(char *text, size_t size, const char *uid)
+    {
+        const size_t n = strlen(uid);
+        if (n == 0)
+            return;
+        char out[sizeof(ErrorInfo::detail)];
+        size_t o = 0;
+        for (const char *p = text; *p != '\0' && o + 1 < sizeof(out);)
+        {
+            if (strncmp(p, uid, n) == 0)
+            {
+                for (const char *m = "***"; *m != '\0' && o + 1 < sizeof(out); m++)
+                    out[o++] = *m;
+                p += n;
+            }
+            else
+            {
+                out[o++] = *p++;
+            }
+        }
+        out[o] = '\0';
+        copyStr(text, size, out);
+    }
+
     inline bool sameError(const ErrorInfo &a, const ErrorInfo &b)
     {
         return a.code == b.code && a.detailCode == b.detailCode && strcmp(a.detail, b.detail) == 0;
@@ -962,7 +987,7 @@ void VendController::showChecking()
     Screen s;
     s.kind = ScreenKind::Checking;
     copyStr(s.title, sizeof(s.title), msg::kChecking);
-    snprintf(s.text, sizeof(s.text), "%s: %s", remote_ ? msg::kRemoteRequest : msg::kCardRead, user_.uid);
+    copyStr(s.text, sizeof(s.text), remote_ ? msg::kRemoteRequest : msg::kCardRead); // the card UID is never displayed
     ui_.show(s);
 }
 
@@ -1002,6 +1027,7 @@ void VendController::showError(uint32_t nowMs, const ErrorInfo &e)
     Screen s;
     s.kind = ScreenKind::Error;
     s.error = e;
+    maskUid(s.error.detail, sizeof(s.error.detail), user_.uid);
     copyStr(s.title, sizeof(s.title), msg::errorTitle(e.code));
     copyStr(s.text, sizeof(s.text), msg::errorHint(e.code));
     if (e.code == ErrorCode::CreditLow)
