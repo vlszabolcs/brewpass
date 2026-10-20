@@ -34,7 +34,7 @@ namespace board
     constexpr uint8_t kOledSaverContrast = 8;
     // Screen saver after this long without activity (card, app request, new screen, machine state change);
     // 0 disables it. Its text jumps to a new place every kOledSaverMoveMs.
-    constexpr uint32_t kOledSaverIdleMs = 0; // switched off on request (was 60000)
+    constexpr uint32_t kOledSaverIdleMs = 60000;
     constexpr uint32_t kOledSaverMoveMs = 8000;
     // Pixel shift of the normal screen: one pixel step this often, within +-kOledShiftMaxX / +-kOledShiftMaxY
     constexpr uint32_t kOledShiftIntervalMs = 60000;
