@@ -699,12 +699,26 @@ void FirebaseCloud::pollIfDue()
     if (static_cast<int32_t>(now - nextConfPollMs_) >= 0)
     {
         nextConfPollMs_ = now + settings::kConfigPollMs;
-        const String path = streamPath();
-        const String data = db.get<String>(aClient, path);
+        // only the two leaves, not the whole /conf node (e.g. /conf/coffeeBeans): smaller allocations
+        const String pricePath = String(DB_CONF_PATH) + "price";
+        const String priceRaw = db.get<String>(aClient, pricePath);
         ErrorInfo err;
-        if (!lastCallOk("Poll config", path.c_str(), err))
+        if (!lastCallOk("Poll config", pricePath.c_str(), err))
             return;
+        const String freePath = String(DB_CONF_PATH) + "free";
+        String freeRaw = db.get<String>(aClient, freePath);
+        if (!lastCallOk("Poll config", freePath.c_str(), err))
+            return;
+        freeRaw.trim();
         lastConfPollOkMs_ = millis();
+
+        int32_t price = 0;
+        JsonDocument doc;
+        if (parseInt(priceRaw, price))
+            doc["price"] = price;
+        doc["free"] = (freeRaw == "true"); // missing value = not free (same as the original)
+        String data;
+        serializeJson(doc, data);
         if (data != lastConfPolled_)
         {
             lastConfPolled_ = data;

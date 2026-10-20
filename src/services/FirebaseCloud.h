@@ -34,6 +34,8 @@ public:
     bool remoteLive() const override { return remoteLive_.load(); }
     // true when the requests keep failing although WiFi is up and the recovery did not help (-> restart)
     bool stuck() const { return stuck_.load(); }
+    // smallest free stack of the network task so far, bytes (diagnostics)
+    uint32_t taskStackFree() const { return task_ != nullptr ? uxTaskGetStackHighWaterMark(task_) : 0; }
 
     // from the auth / stream callbacks (in the network task)
     void onAuthEvent(int code, const char *message, bool isError);

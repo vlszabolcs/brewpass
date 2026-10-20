@@ -32,7 +32,7 @@
 namespace settings
 {
     constexpr const char *kFirmwareName = "BrewPass";
-    constexpr const char *kFirmwareVersion = "2.2.0";
+    constexpr const char *kFirmwareVersion = "2.2.1";
     constexpr const char *kHostname = "brewpass"; // mDNS: brewpass.local (OTA)
     // NVS namespace - kept from the old project name (rfidValidator), so the saved price/mode survives the rename
     constexpr const char *kNvsNamespace = "rfidval";
@@ -56,10 +56,16 @@ namespace settings
     // Firebase (time limits of the synchronous operations in the background task)
     constexpr uint32_t kFirebaseSyncTimeoutS = 8;
     constexpr uint32_t kFirebaseHandshakeTimeoutS = 8;
+#if defined(BOARD_TARGET)
+    // plain ESP32 without PSRAM: smaller network task stack and request queue (the free stack is in the health log)
+    constexpr uint32_t kCloudTaskStackBytes = 12288;
+    constexpr uint8_t kCloudRequestQueueLen = 8;
+#else
     constexpr uint32_t kCloudTaskStackBytes = 16384;
+    constexpr uint8_t kCloudRequestQueueLen = 16;
+#endif
     constexpr uint8_t kCloudTaskPriority = 1;
     constexpr uint8_t kCloudTaskCore = 0;
-    constexpr uint8_t kCloudRequestQueueLen = 16;
     constexpr uint8_t kCloudResponseQueueLen = 8;
     constexpr uint8_t kLogMaxAttempts = 3;
     // Recovery from a stuck database connection (E22/E23 on every request while WiFi is up):
@@ -96,6 +102,12 @@ namespace settings
     constexpr uint32_t kRemotePollMs = 3000;
     constexpr uint32_t kRemoteStreamMinFreeHeap = 70000;
     constexpr uint32_t kRemoteStreamHeapRetryMs = 60000;
+
+    // Preventive restart (the original firmware also needed a periodic restart): once a day at this local
+    // hour, only in an idle state and only after at least kDailyRestartMinUptimeS of uptime
+    constexpr bool kDailyRestartEnabled = true;
+    constexpr int kDailyRestartHour = 3;
+    constexpr uint32_t kDailyRestartMinUptimeS = 2UL * 60UL * 60UL;
 
     // Diagnostics
     constexpr uint32_t kHeapReportIntervalMs = 60000;

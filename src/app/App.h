@@ -23,6 +23,7 @@ private:
     void printBanner();
     void reportHealth(uint32_t nowMs);
     void restartIfCloudStuck();
+    void dailyRestart(uint32_t nowMs);
     bool handleOta();
 
     Hardware &hw_;

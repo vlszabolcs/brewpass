@@ -15,15 +15,29 @@ namespace
     const WifiNetwork::Credential kNetworks[] = WIFI_NETWORKS;
     constexpr uint32_t kBootEventTtlMs = 30UL * 60UL * 1000UL; // also logged after an offline boot if the network is up within 30 min
 
-    // survives a software restart: marks the restart made by the stuck database connection recovery
+    // survives a software restart: why the firmware restarted itself (shown in the boot event)
     constexpr uint32_t kCloudRestartMagic = 0xC10DB007;
-    RTC_NOINIT_ATTR uint32_t gCloudRestartMark;
+    constexpr uint32_t kDailyRestartMagic = 0xDA11DB07;
+    RTC_NOINIT_ATTR uint32_t gRestartMark;
 
-    bool consumeCloudRestartMark()
+    const char *consumeRestartMark()
     {
-        const bool set = esp_reset_reason() == ESP_RST_SW && gCloudRestartMark == kCloudRestartMagic;
-        gCloudRestartMark = 0;
-        return set;
+        const uint32_t mark = gRestartMark;
+        gRestartMark = 0;
+        if (esp_reset_reason() != ESP_RST_SW)
+            return "";
+        if (mark == kCloudRestartMagic)
+            return " (database requests kept failing)";
+        if (mark == kDailyRestartMagic)
+            return " (daily preventive restart)";
+        return "";
+    }
+
+    void restartWithMark(uint32_t mark)
+    {
+        gRestartMark = mark;
+        delay(100);
+        ESP.restart();
     }
 
     const char *resetReasonText(esp_reset_reason_t r)
@@ -69,11 +83,11 @@ void App::begin()
 
     // boot event to the device log (/Log); the background task writes it after WiFi + time sync
     const bool afterOta = OtaService::consumeUpdatedFlag();
-    const bool afterCloudStuck = consumeCloudRestartMark();
+    const char *restartMark = consumeRestartMark();
     const CloudRequest boot = makeDeviceEvent(millis() + kBootEventTtlMs, 0, "boot", "%s v%s, reason: %s%s%s", board::kShortName,
                                               settings::kFirmwareVersion, resetReasonText(esp_reset_reason()),
                                               afterOta ? " (after OTA update)" : "",
-                                              afterCloudStuck ? " (database requests kept failing)" : "");
+                                              restartMark);
     cloud_.submit(boot);
 
     controller_.begin(configStore_.load(), configStore_.loadRemoteMark());
@@ -99,6 +113,7 @@ void App::loop()
     hw_.ui.loop(now);
     reportHealth(now);
     restartIfCloudStuck();
+    dailyRestart(now);
 }
 
 // Last resort for a database connection that does not recover by itself (a reset always fixed it)
@@ -109,9 +124,23 @@ void App::restartIfCloudStuck()
         return;
     LOGE(TAG, "Database requests keep failing for %lu s - restarting",
          (unsigned long)(settings::kCloudStuckRestartMs / 1000));
-    gCloudRestartMark = kCloudRestartMagic;
-    delay(100);
-    ESP.restart();
+    restartWithMark(kCloudRestartMagic);
+}
+
+// Preventive daily restart at night (heap fragmentation over weeks of uptime), only in an idle state
+void App::dailyRestart(uint32_t nowMs)
+{
+    if (!settings::kDailyRestartEnabled || nowMs / 1000 < settings::kDailyRestartMinUptimeS || !clock_.synced())
+        return;
+    if (controller_.state() != VendController::State::Idle)
+        return;
+    const time_t t = static_cast<time_t>(clock_.epoch());
+    struct tm local;
+    localtime_r(&t, &local);
+    if (local.tm_hour != settings::kDailyRestartHour)
+        return;
+    LOGI(TAG, "Daily preventive restart (uptime %lu s)", (unsigned long)(nowMs / 1000));
+    restartWithMark(kDailyRestartMagic);
 }
 
 // true while an OTA update is running (purchases are paused meanwhile)
@@ -172,7 +201,7 @@ void App::reportHealth(uint32_t nowMs)
     if (nowMs - lastHealthMs_ < settings::kHeapReportIntervalMs)
         return;
     lastHealthMs_ = nowMs;
-    LOGI(TAG, "State: %s | heap: %u (min %u, largest block %u) | uptime: %lu s",
+    LOGI(TAG, "State: %s | heap: %u (min %u, largest block %u) | network task stack free: %u | uptime: %lu s",
          VendController::stateName(controller_.state()), (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap(),
-         (unsigned)ESP.getMaxAllocHeap(), (unsigned long)(nowMs / 1000));
+         (unsigned)ESP.getMaxAllocHeap(), (unsigned)cloud_.taskStackFree(), (unsigned long)(nowMs / 1000));
 }
