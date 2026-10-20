@@ -32,7 +32,7 @@
 namespace settings
 {
     constexpr const char *kFirmwareName = "BrewPass";
-    constexpr const char *kFirmwareVersion = "2.3.0";
+    constexpr const char *kFirmwareVersion = "2.3.1";
     constexpr const char *kHostname = "brewpass"; // mDNS: brewpass.local (OTA)
     // NVS namespace - kept from the old project name (rfidValidator), so the saved price/mode survives the rename
     constexpr const char *kNvsNamespace = "rfidval";

@@ -100,7 +100,9 @@ void OledUi::render()
         }
         else
         {
-            drawStatusBar();
+            // after a card tap only the user matters: no status bar (network, clock)
+            if (screen_.kind != ScreenKind::Checking && screen_.kind != ScreenKind::Success)
+                drawStatusBar();
             drawBody();
         }
         // pixel shift: the static elements do not always light the same pixels
@@ -213,8 +215,11 @@ void OledUi::drawBody()
         break;
 
     case ScreenKind::Success:
-        u8g2_.setFont(kFontText);
-        textwrap::drawWrapped(u8g2_, 0, 24, kW, 13, screen_.title, 1, true);
+        // the user's name (large if it fits) and the remaining credit
+        u8g2_.setFont(kFontBig);
+        if (u8g2_.getUTF8Width(screen_.title) > kW)
+            u8g2_.setFont(kFontText);
+        textwrap::drawWrapped(u8g2_, 0, 18, kW, 13, screen_.title, 1, true);
         u8g2_.setFont(kFontAmount);
         snprintf(buf, sizeof(buf), "%ld %s", (long)screen_.amount, msg::kCurrency);
         textwrap::drawCentered(u8g2_, 0, 46, kW, buf);
