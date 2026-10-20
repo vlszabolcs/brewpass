@@ -27,4 +27,17 @@ namespace board
 
     // OLED: hardware I2C on the default pins (SDA 21, SCL 22)
     constexpr uint32_t kOledI2cClockHz = 400000;
+
+    // OLED burn-in protection
+    // Contrast (0..255, the SH1106 default is 128): a lower value slows the burn-in down
+    constexpr uint8_t kOledContrast = 64;
+    constexpr uint8_t kOledSaverContrast = 8;
+    // Screen saver after this long without activity (card, app request, new screen, machine state change);
+    // 0 disables it. Its text jumps to a new place every kOledSaverMoveMs.
+    constexpr uint32_t kOledSaverIdleMs = 60000;
+    constexpr uint32_t kOledSaverMoveMs = 8000;
+    // Pixel shift of the normal screen: one pixel step this often, within +-kOledShiftMaxX / +-kOledShiftMaxY
+    constexpr uint32_t kOledShiftIntervalMs = 60000;
+    constexpr uint8_t kOledShiftMaxX = 2;
+    constexpr uint8_t kOledShiftMaxY = 1;
 } // namespace board

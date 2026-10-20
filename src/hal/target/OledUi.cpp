@@ -19,7 +19,11 @@ namespace
     constexpr uint16_t kIconCheck = 'C';
 } // namespace
 
-OledUi::OledUi(uint32_t i2cClockHz) : u8g2_(U8G2_R0, U8X8_PIN_NONE), i2cClockHz_(i2cClockHz) {}
+OledUi::OledUi(uint32_t i2cClockHz, const ScreenSaverConfig &saver, uint8_t contrast, uint8_t saverContrast)
+    : u8g2_(U8G2_R0, U8X8_PIN_NONE), i2cClockHz_(i2cClockHz), saver_(saver), contrast_(contrast),
+      saverContrast_(saverContrast)
+{
+}
 
 bool OledUi::begin()
 {
@@ -27,6 +31,7 @@ bool OledUi::begin()
     const bool ok = u8g2_.begin();
     u8g2_.enableUTF8Print();
     u8g2_.setFontMode(1);
+    saver_.activity(millis());
     dirty_ = true;
     render();
     return ok;
@@ -37,6 +42,8 @@ void OledUi::show(const Screen &screen)
     screen_ = screen;
     showHint_ = false;
     altToggleMs_ = millis();
+    // every new screen (card tap, app request, result, error) wakes the screen saver
+    saver_.activity(altToggleMs_);
     dirty_ = true;
 }
 
@@ -44,9 +51,12 @@ void OledUi::setStatus(const StatusInfo &status)
 {
     if (status != status_)
     {
+        // the machine changed state: someone is using it, wake the screen saver
+        if (status.machineReady != status_.machineReady)
+            saver_.activity(millis());
         status_ = status;
-        // the error screen has no status bar, no need to redraw
-        if (screen_.kind != ScreenKind::Error)
+        // the error screen has no status bar, no need to redraw (the screen saver shows the clock)
+        if (screen_.kind != ScreenKind::Error || saver_.active())
             dirty_ = true;
     }
 }
@@ -61,6 +71,8 @@ void OledUi::loop(uint32_t nowMs)
         showHint_ = !showHint_;
         dirty_ = true;
     }
+    if (saver_.update(nowMs))
+        dirty_ = true;
     if (dirty_ && nowMs - lastRenderMs_ >= kMinRenderIntervalMs)
     {
         lastRenderMs_ = nowMs;
@@ -71,18 +83,87 @@ void OledUi::loop(uint32_t nowMs)
 void OledUi::render()
 {
     dirty_ = false;
+    const uint32_t now = millis();
     u8g2_.clearBuffer();
     u8g2_.setDrawColor(1);
-    if (screen_.kind == ScreenKind::Error)
+    if (saver_.active())
     {
-        drawError();
+        setContrast(saverContrast_);
+        drawSaver(now);
     }
     else
     {
-        drawStatusBar();
-        drawBody();
+        setContrast(contrast_);
+        if (screen_.kind == ScreenKind::Error)
+        {
+            drawError();
+        }
+        else
+        {
+            drawStatusBar();
+            drawBody();
+        }
+        // pixel shift: the static elements do not always light the same pixels
+        int8_t dx, dy;
+        saver_.shift(now, dx, dy);
+        pixelshift::shiftPages(u8g2_.getBufferPtr(), u8g2_.getBufferTileWidth() * 8, u8g2_.getBufferTileHeight(), dx,
+                               dy);
     }
     u8g2_.sendBuffer();
+}
+
+void OledUi::setContrast(uint8_t value)
+{
+    if (contrastSent_ == value)
+        return;
+    contrastSent_ = value;
+    u8g2_.setContrast(value);
+}
+
+// Screen saver: a small text (what the screen is about + the clock) that jumps to a new place regularly
+void OledUi::drawSaver(uint32_t nowMs)
+{
+    char line1[64];
+    switch (screen_.kind)
+    {
+    case ScreenKind::Idle:
+        snprintf(line1, sizeof(line1), "%s %ld %s", screen_.title, (long)screen_.amount, msg::kCurrency);
+        break;
+    case ScreenKind::Error:
+        snprintf(line1, sizeof(line1), "%s E%u", msg::kErrorPrefix, static_cast<unsigned>(screen_.error.code));
+        break;
+    case ScreenKind::Boot:
+        if (screen_.error.isError())
+        {
+            snprintf(line1, sizeof(line1), "%s E%u", msg::kErrorPrefix, static_cast<unsigned>(screen_.error.code));
+            break;
+        }
+        // fall through
+    default:
+        snprintf(line1, sizeof(line1), "%s", screen_.title);
+        break;
+    }
+    // "HH:MM" - the seconds would make the redraw pointless every second
+    char line2[6] = {0};
+    if (status_.clock[0])
+        snprintf(line2, sizeof(line2), "%.5s", status_.clock);
+
+    u8g2_.setFont(kFontText);
+    const int16_t w1 = u8g2_.getUTF8Width(line1);
+    u8g2_.setFont(kFontSmall);
+    const int16_t w2 = line2[0] ? u8g2_.getUTF8Width(line2) : 0;
+    const int16_t w = w1 > w2 ? w1 : w2;
+    const int16_t h = line2[0] ? 24 : 13;
+    int16_t x, y;
+    saver_.position(nowMs, w, h, kW, 64, x, y);
+
+    u8g2_.setFont(kFontText);
+    u8g2_.drawUTF8(x + (w - w1) / 2, y + 10, line1);
+    if (line2[0])
+    {
+        u8g2_.setFont(kFontSmall);
+        u8g2_.drawUTF8(x + (w - w2) / 2, y + 22, line2);
+    }
 }
 
 void OledUi::drawStatusBar()

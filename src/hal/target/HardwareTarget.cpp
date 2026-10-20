@@ -25,7 +25,9 @@ namespace board
         static GpioCoinMechanism coin(kCoinOutPin, kInhibitPin, kCoinOutOpenDrain,
                                       {settings::kCoinPulseCount, settings::kCoinPulseLowMs, settings::kCoinPulseHighMs},
                                       settings::kInhibitDebounceMs);
-        static OledUi ui(kOledI2cClockHz);
+        static OledUi ui(kOledI2cClockHz,
+                         {kOledSaverIdleMs, kOledSaverMoveMs, kOledShiftIntervalMs, kOledShiftMaxX, kOledShiftMaxY},
+                         kOledContrast, kOledSaverContrast);
         static BuzzerFeedback feedback(kBuzzerPin, kBuzzerLedcChannel);
         static Hardware hw{reader, coin, ui, feedback};
         return hw;
