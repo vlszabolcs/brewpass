@@ -44,6 +44,9 @@ void OledUi::show(const Screen &screen)
     altToggleMs_ = millis();
     // every new screen (card tap, app request, result, error) wakes the screen saver
     saver_.activity(altToggleMs_);
+    // the screen saver is off after boot; it is armed by the first purchase
+    if (screen.kind == ScreenKind::Success || screen.kind == ScreenKind::FreeVend)
+        saverArmed_ = true;
     dirty_ = true;
 }
 
@@ -71,6 +74,9 @@ void OledUi::loop(uint32_t nowMs)
         showHint_ = !showHint_;
         dirty_ = true;
     }
+    // only on the pay screen (clock + "Fizess!"), never during a purchase: elsewhere the idle timer is held
+    if (!saverArmed_ || screen_.kind != ScreenKind::Idle)
+        saver_.activity(nowMs);
     if (saver_.update(nowMs))
         dirty_ = true;
     if (dirty_ && nowMs - lastRenderMs_ >= kMinRenderIntervalMs)

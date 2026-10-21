@@ -32,6 +32,7 @@ private:
     uint32_t lastRenderMs_ = 0;
     // on the error screen the details and the hint are shown alternately
     bool showHint_ = false;
+    bool saverArmed_ = false; // the first purchase switches the screen saver on
     uint32_t altToggleMs_ = 0;
     ScreenSaver saver_;
     uint8_t contrast_;
