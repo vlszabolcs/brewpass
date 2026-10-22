@@ -7,6 +7,7 @@
 #include <WiFiClientSecure.h>
 #include <esp_task_wdt.h>
 
+#include "HangTrace.h"
 #include "Settings.h"
 
 namespace
@@ -258,6 +259,7 @@ void FirebaseCloud::run()
     for (;;)
     {
         esp_task_wdt_reset();
+        hangtrace::cloud("wifi");
         wifi_.maintain(millis());
         const bool online = wifi_.connected();
         trackWifiEvents(online);
@@ -267,8 +269,10 @@ void FirebaseCloud::run()
             clock_.startSync(settings::kTimezone, settings::kNtpServer1, settings::kNtpServer2);
             if (!appStarted_)
                 startApp();
+            hangtrace::cloud("app loop");
             app.loop();
         }
+        hangtrace::cloud("ota/streams");
         if (netClient_ != nullptr)
             netClient_->onNetTick(online);
         maintainStreams(online, online && appStarted_ && app.ready());
@@ -341,6 +345,7 @@ void FirebaseCloud::respond(const CloudResponse &resp)
 void FirebaseCloud::process(CloudRequest &req)
 {
     [[maybe_unused]] const uint32_t started = millis();
+    hangtrace::cloud(opName(req.op));
 
     if (expired(req))
     {
@@ -686,6 +691,7 @@ void FirebaseCloud::pollIfDue()
     if (settings::kRemoteVendEnabled && static_cast<int32_t>(now - nextRemotePollMs_) >= 0)
     {
         nextRemotePollMs_ = now + settings::kRemotePollMs;
+        hangtrace::cloud("poll requests");
         const String path = remoteBasePath() + "/req";
         const String data = db.get<String>(aClient, path);
         ErrorInfo err;
@@ -699,6 +705,7 @@ void FirebaseCloud::pollIfDue()
     if (static_cast<int32_t>(now - nextConfPollMs_) >= 0)
     {
         nextConfPollMs_ = now + settings::kConfigPollMs;
+        hangtrace::cloud("poll config");
         // only the two leaves, not the whole /conf node (e.g. /conf/coffeeBeans): smaller allocations
         const String pricePath = String(DB_CONF_PATH) + "price";
         const String priceRaw = db.get<String>(aClient, pricePath);
