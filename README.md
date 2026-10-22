@@ -257,6 +257,8 @@ The display shows `HIBA E<code>` + a short Hungarian title + what to do. The tec
 - The time zone is a POSIX TZ: DST changes are correct at runtime too.
 - The RC522 and the PN532 have a health check and recover automatically after a hang.
 - A task watchdog (45 s) is active. At startup the reset reason and the heap state are printed, and a status report every minute.
+- After a watchdog restart the boot event also says which task was stuck and in which step (e.g. `net: poll requests 46s, loop 0s`).
+- FirebaseClient is pinned to 2.2.13 and patched at build time (`scripts/patch_firebaseclient.py`): its synchronous read loop never timed out when the connection stalled in the middle of a response, which hung the network task until the watchdog restarted the device.
 - The COIN pulses are timed by esp_timer, so main-loop load does not distort them. No short LOW glitch on the output at startup.
 - A card is only taken into account once (2 s hold-off for the same UID).
 

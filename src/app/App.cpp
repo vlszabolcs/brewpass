@@ -7,6 +7,7 @@
 
 #include "BoardConfig.h"
 #include "Settings.h"
+#include "../services/HangTrace.h"
 
 namespace
 {
@@ -78,16 +79,22 @@ void App::begin()
     if (!hw_.reader.begin())
         LOGE(TAG, "RFID reader (%s) not responding - retrying in the background", hw_.reader.name());
 
+    // after a watchdog restart: which task got stuck and where (read before the network task starts)
+    char hang[48];
+    hangtrace::report(hang, sizeof(hang));
+    if (hang[0])
+        LOGW(TAG, "Watchdog trace: %s", hang);
+
     cloud_.setNetTaskClient(&ota_);
     cloud_.begin(); // WiFi + time + Firebase + OTA in the background task
 
     // boot event to the device log (/Log); the background task writes it after WiFi + time sync
     const bool afterOta = OtaService::consumeUpdatedFlag();
     const char *restartMark = consumeRestartMark();
-    const CloudRequest boot = makeDeviceEvent(millis() + kBootEventTtlMs, 0, "boot", "%s v%s, reason: %s%s%s", board::kShortName,
+    const CloudRequest boot = makeDeviceEvent(millis() + kBootEventTtlMs, 0, "boot", "%s v%s, reason: %s%s%s%s%s", board::kShortName,
                                               settings::kFirmwareVersion, resetReasonText(esp_reset_reason()),
                                               afterOta ? " (after OTA update)" : "",
-                                              restartMark);
+                                              restartMark, hang[0] ? " | " : "", hang);
     cloud_.submit(boot);
 
     controller_.begin(configStore_.load(), configStore_.loadRemoteMark());
@@ -98,6 +105,7 @@ void App::begin()
 void App::loop()
 {
     const uint32_t now = millis();
+    hangtrace::loopTick();
     hw_.coin.loop(now);
     hw_.feedback.loop(now);
     if (handleOta())
